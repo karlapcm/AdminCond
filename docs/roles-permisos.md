@@ -110,13 +110,16 @@ La restricción «un responsable principal activo por unidad» debe aplicarse ta
 
 **Aprobado:** supercliente supervisa su cartera; funciones sensibles requieren permiso adicional. Responsable principal solicita altas de convivientes; administrador aprueba. Unidades admiten varios ocupantes con cuentas individuales. Datos y finanzas aislados por condominio.
 
-**Pendiente para diseño fino:** quién concede/revoca capacidades financieras y bajo qué doble verificación; si el propietario no residente tendrá cuenta opcional; permisos delegados a residentes adicionales; procedimiento de soporte excepcional; protección contra abuso de invitaciones; caducidad de tokens y sesiones.
+**Pendiente para diseño fino:** si el propietario no residente tendrá cuenta opcional; permisos delegados a residentes adicionales; procedimiento de soporte excepcional; protección contra abuso de invitaciones; caducidad de tokens y sesiones.
 
-## 9. Criterio de finalización de esta tarjeta
+### RN-18 — Asignación de permisos financieros
 
-- [x] Actores identificados y diferencias documentadas.
-- [x] Matriz de operaciones y ámbitos propuesta.
-- [x] Reglas de autorización y casos de prueba definidos.
-- [ ] Revisar conjuntamente los puntos pendientes antes de considerar la matriz definitiva.
-- [ ] Subir este archivo a `docs/roles-permisos.md` en GitHub.
-- [ ] Vincular el commit en Trello y mover la tarjeta a **Terminado**.
+Solo un Supercliente autorizado puede conceder o revocar permisos financieros a administradores de condominios pertenecientes a su cliente. La operación requiere autenticación reforzada, autorización vigente y registro de auditoría.
+
+- Los permisos financieros serán específicos, como generar cuotas o validar pagos.
+- Un administrador no podrá concederse permisos financieros a sí mismo.
+- La revocación deberá aplicarse en las siguientes operaciones, sin depender de la expiración del JWT.
+- El usuario que registra un pago no podrá aprobar ese mismo pago.
+- Se verificarán siempre el cliente, el condominio y el permiso correspondiente.
+
+
