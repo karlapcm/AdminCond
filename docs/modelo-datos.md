@@ -95,3 +95,12 @@ Convenciones: `PK` clave primaria; `FK` clave foránea; `NN` obligatorio; `UQ` �
 | Edificio de otro condominio | FK compuesta o restricción equivalente impide vínculo incorrecto. |
 | Admin intenta validar pago sin permiso | Denegación en backend y evento de auditoría. |
 
+## 6. Pendientes de diseño, sin bloquear el núcleo
+
+- Forma exacta de implementar `roles` y permisos compuestos evitando concesiones contradictorias.
+- Si propietarios no residentes tendrán acceso opcional y su autorización específica.
+- Políticas para delegación financiera, pagos parciales, conciliación y titular de cuenta receptora (especialmente V2 con pasarela).
+- Flujo de soporte excepcional del Super Admin y retención de auditoría.
+- Normalización de datos personales, políticas de borrado y cumplimiento según país.
+- Detalle de `comunicados`, `juntas`, `documentos` y `publicaciones_publicas`.
+- Modelo futuro de reservas de áreas comunes y restricciones de solapamiento.
