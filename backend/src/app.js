@@ -5,9 +5,9 @@ import cors from "cors";
 import "dotenv/config";
 import { clientRouter } from "./modules/clients/client.routes.js";
 import { condominiumRouter } from "./modules/condominiums/condominium.routes.js";
-
 import { pool } from "./database/pool.js";
 import { authRouter } from "./modules/auth/auth.routes.js";
+import { unitRouter } from "./modules/units/unit.routes.js";
 
 const app = express();
 
@@ -70,6 +70,7 @@ app.use((err, _req, res, _next) => {
 app.use("/api/auth", authRouter);
 app.use("/api/clients", clientRouter);
 app.use("/api/condominiums", condominiumRouter);
+app.use("/api/units", unitRouter);
 
 app.listen(PORT, HOST, () => {
   console.log(`AdminCond API escuchando en ${HOST}:${PORT}`);
