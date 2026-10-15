@@ -3,6 +3,8 @@ import express from "express";
 import helmet from "helmet";
 import cors from "cors";
 import "dotenv/config";
+import { clientRouter } from "./modules/clients/client.routes.js";
+import { condominiumRouter } from "./modules/condominiums/condominium.routes.js";
 
 import { pool } from "./database/pool.js";
 import { authRouter } from "./modules/auth/auth.routes.js";
@@ -64,6 +66,10 @@ app.use((err, _req, res, _next) => {
     message: "Error interno del servidor",
   });
 });
+
+app.use("/api/auth", authRouter);
+app.use("/api/clients", clientRouter);
+app.use("/api/condominiums", condominiumRouter);
 
 app.listen(PORT, HOST, () => {
   console.log(`AdminCond API escuchando en ${HOST}:${PORT}`);
