@@ -1,0 +1,40 @@
+
+services:
+  postgres:
+    image: postgres:17-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: admincond_dev
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Define POSTGRES_PASSWORD}
+    ports:
+      - "127.0.0.1:5433:5432"
+    volumes:
+      - admincond_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - pg_isready -U postgres -d admincond_dev
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  api:
+    build:
+      context: ./backend
+    restart: unless-stopped
+    env_file:
+      - ./backend/.env
+    environment:
+      HOST: 0.0.0.0
+      PORT: 3000
+      DB_HOST: postgres
+      DB_PORT: 5432
+    ports:
+      - "127.0.0.1:3000:3000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+volumes:
+  admincond_pgdata:
