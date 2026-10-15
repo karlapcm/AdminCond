@@ -8,6 +8,7 @@ import { condominiumRouter } from "./modules/condominiums/condominium.routes.js"
 import { pool } from "./database/pool.js";
 import { authRouter } from "./modules/auth/auth.routes.js";
 import { unitRouter } from "./modules/units/unit.routes.js";
+import { invitationRouter } from "./modules/invitations/invitation.routes.js";
 
 const app = express();
 
@@ -54,7 +55,13 @@ app.use("/api/auth", authRouter);
 
 // Manejo centralizado de errores
 app.use((err, _req, res, _next) => {
-  console.error("API error:", err.message);
+  console.error("API error:", err.code || err.message);
+
+  if (err.code === "23505") {
+    return res.status(409).json({
+      message: "Ya existe un registro o solicitud equivalente",
+    });
+  }
 
   if (err instanceof SyntaxError && err.status === 400) {
     return res.status(400).json({
@@ -62,7 +69,13 @@ app.use((err, _req, res, _next) => {
     });
   }
 
-  res.status(500).json({
+  if ([400, 403, 404, 409].includes(err.status)) {
+    return res.status(err.status).json({
+      message: err.message,
+    });
+  }
+
+  return res.status(500).json({
     message: "Error interno del servidor",
   });
 });
@@ -71,6 +84,7 @@ app.use("/api/auth", authRouter);
 app.use("/api/clients", clientRouter);
 app.use("/api/condominiums", condominiumRouter);
 app.use("/api/units", unitRouter);
+app.use("/api/invitations", invitationRouter);
 
 app.listen(PORT, HOST, () => {
   console.log(`AdminCond API escuchando en ${HOST}:${PORT}`);
