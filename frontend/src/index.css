@@ -705,3 +705,336 @@ h3 {
     grid-template-columns: 1fr;
   }
 }
+
+
+/* =======================================
+   DÍA 13 — CONDOMINIOS REALES
+======================================= */
+
+.section-heading-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 20px;
+}
+
+.refresh-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 10px 15px;
+  border: 1px solid #d5e6e4;
+  border-radius: 10px;
+  background: white;
+  color: #117d76;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.refresh-button:hover:not(:disabled) {
+  background: #eaf8f5;
+}
+
+.result-count {
+  color: #637b85;
+  font-size: 12px;
+  font-weight: 700;
+  margin-bottom: 16px;
+}
+
+.condominiums-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 18px;
+}
+
+.condominium-card {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  padding: 23px;
+  border: 1px solid #e0eaed;
+  border-radius: 16px;
+  background: #fff;
+  box-shadow: 0 5px 20px #173c4208;
+}
+
+.condominium-card-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.condominium-icon {
+  height: 48px;
+  width: 48px;
+  display: grid;
+  place-items: center;
+  border-radius: 13px;
+  background: #e6f7f2;
+  color: #0a8277;
+}
+
+.condominium-status {
+  display: inline-flex;
+  padding: 7px 11px;
+  border-radius: 100px;
+  background: #e7f7eb;
+  color: #247e49;
+  font-size: 11px;
+  font-weight: 800;
+  text-transform: capitalize;
+}
+
+.condominium-card h3 {
+  margin: 22px 0 12px;
+  font-size: 16px;
+  letter-spacing: -0.4px;
+  overflow-wrap: anywhere;
+}
+
+.condominium-address {
+  display: flex;
+  align-items: flex-start;
+  gap: 9px;
+  min-height: 48px;
+  color: #83939c;
+  font-size: 12px;
+  line-height: 1.6;
+  overflow-wrap: anywhere;
+}
+
+.condominium-address svg {
+  flex-shrink: 0;
+}
+
+.condominium-link {
+  display: inline-flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 10px;
+  margin-top: auto;
+  padding-top: 18px;
+  border-top: 1px solid #edf2f3;
+  color: #0c8278;
+  text-decoration: none;
+  font-weight: 800;
+  font-size: 12px;
+}
+
+.condominium-link:hover {
+  color: #075e58;
+}
+
+.data-state {
+  min-height: 230px;
+  padding: 35px 20px;
+  border: 1px dashed #d6e6e5;
+  border-radius: 16px;
+  background: white;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  text-align: center;
+  color: #0d847a;
+}
+
+.data-state h3,
+.data-state h2 {
+  color: #294753;
+  margin: 8px 0 0;
+  font-size: 17px;
+}
+
+.data-state p {
+  max-width: 450px;
+  color: #7a8b95;
+  font-size: 13px;
+  line-height: 1.7;
+  margin: 0;
+}
+
+.error-state {
+  color: #bd5151;
+}
+
+.spin {
+  animation: admincond-spin 1s linear infinite;
+}
+
+@keyframes admincond-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+/* Detalle del condominio */
+
+.detail-layout {
+  min-height: 100vh;
+  background: #f5f8fa;
+}
+
+.detail-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 15px;
+  padding: 22px clamp(20px, 5vw, 65px);
+  background: white;
+  border-bottom: 1px solid #e5ecef;
+}
+
+.detail-brand {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  color: #0b7771;
+  font-size: 20px;
+  font-weight: 800;
+  text-decoration: none;
+}
+
+.back-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  color: #496977;
+  font-size: 12px;
+  font-weight: 700;
+  text-decoration: none;
+}
+
+.back-link:hover {
+  color: #0c8278;
+}
+
+.detail-content {
+  max-width: 1080px;
+  margin: 0 auto;
+  padding: 50px 24px 80px;
+}
+
+.detail-title-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  margin-top: 14px;
+  margin-bottom: 30px;
+}
+
+.detail-title-row h1 {
+  font-size: clamp(26px, 4vw, 36px);
+  margin: 0 0 10px;
+  overflow-wrap: anywhere;
+}
+
+.detail-title-row p {
+  color: #84949b;
+  font-size: 13px;
+  margin: 0;
+}
+
+.detail-card {
+  border: 1px solid #e2eaed;
+  border-radius: 17px;
+  background: white;
+  padding: 30px;
+}
+
+.detail-card h2 {
+  font-size: 19px;
+  margin: 0 0 30px;
+}
+
+.detail-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 35px;
+}
+
+.detail-field {
+  display: flex;
+  align-items: flex-start;
+  gap: 14px;
+}
+
+.detail-field > svg {
+  flex-shrink: 0;
+  color: #0c8b80;
+}
+
+.detail-field div {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  min-width: 0;
+}
+
+.detail-field span {
+  color: #8999a2;
+  font-size: 12px;
+}
+
+.detail-field strong {
+  color: #25424e;
+  font-size: 14px;
+  overflow-wrap: anywhere;
+}
+
+.detail-info {
+  margin-top: 22px;
+  padding: 18px;
+  border-radius: 12px;
+  background: #eaf6f4;
+  color: #397f78;
+  font-size: 12px;
+  line-height: 1.7;
+}
+
+.primary-link {
+  display: inline-flex;
+  padding: 11px 17px;
+  border-radius: 10px;
+  background: #0c817b;
+  color: white;
+  text-decoration: none;
+  font-size: 12px;
+  font-weight: 800;
+}
+
+@media (max-width: 1050px) {
+  .condominiums-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 650px) {
+  .condominiums-grid,
+  .detail-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .section-heading-row {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .detail-title-row {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .detail-card {
+    padding: 22px;
+  }
+
+  .detail-header {
+    flex-wrap: wrap;
+  }
+}
