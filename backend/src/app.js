@@ -9,6 +9,8 @@ import { pool } from "./database/pool.js";
 import { authRouter } from "./modules/auth/auth.routes.js";
 import { unitRouter } from "./modules/units/unit.routes.js";
 import { invitationRouter } from "./modules/invitations/invitation.routes.js";
+import { financeRouter } from "./modules/finance/finance.routes.js";
+import { receiptRouter } from "./modules/finance/receipt.routes.js";
 
 const app = express();
 
@@ -53,23 +55,43 @@ app.get("/api/health/db", async (_req, res) => {
 // Rutas de autenticación: login, refresh, me y logout
 app.use("/api/auth", authRouter);
 
+app.use((err, _req, res, next) => {
+  if (err?.code === "LIMIT_FILE_SIZE") {
+    return res.status(413).json({
+      message: "El comprobante no puede superar 5 MB",
+    });
+  }
+
+  if (err instanceof Error &&
+      err.name === "MulterError") {
+    return res.status(400).json({
+      message: "Archivo o formulario inválido",
+    });
+  }
+
+  next(err);
+});
+
 // Manejo centralizado de errores
+
 app.use((err, _req, res, _next) => {
   console.error("API error:", err.code || err.message);
 
   if (err.code === "23505") {
     return res.status(409).json({
-      message: "Ya existe un registro o solicitud equivalente",
+      message: "El registro ya existe",
     });
   }
 
   if (err instanceof SyntaxError && err.status === 400) {
     return res.status(400).json({
-      message: "JSON inválido",
+      message: "El JSON enviado no es válido",
     });
   }
 
-  if ([400, 403, 404, 409].includes(err.status)) {
+  const allowedStatuses = [400, 401, 403, 404, 409];
+
+  if (allowedStatuses.includes(err.status)) {
     return res.status(err.status).json({
       message: err.message,
     });
@@ -80,11 +102,14 @@ app.use((err, _req, res, _next) => {
   });
 });
 
+
 app.use("/api/auth", authRouter);
 app.use("/api/clients", clientRouter);
 app.use("/api/condominiums", condominiumRouter);
 app.use("/api/units", unitRouter);
 app.use("/api/invitations", invitationRouter);
+app.use("/api/finance", financeRouter);
+app.use("/api/finance/receipts", receiptRouter);
 
 app.listen(PORT, HOST, () => {
   console.log(`AdminCond API escuchando en ${HOST}:${PORT}`);

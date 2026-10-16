@@ -19,6 +19,17 @@ services:
       timeout: 3s
       retries: 10
 
+  receipts-init:
+    image: alpine:3.21
+    user: root
+    command:
+      - sh
+      - -c
+      - mkdir -p /receipts && chown -R 1000:1000 /receipts && chmod 700 /receipts
+    volumes:
+      - admincond_receipts:/receipts
+    restart: "no"
+
   api:
     build:
       context: ./backend
@@ -30,11 +41,18 @@ services:
       PORT: 3000
       DB_HOST: postgres
       DB_PORT: 5432
+      RECEIPTS_DIR: /app/private_receipts
     ports:
       - "127.0.0.1:3000:3000"
+    volumes:
+      - ./backend/src:/app/src:ro
+      - admincond_receipts:/app/private_receipts
     depends_on:
       postgres:
         condition: service_healthy
+      receipts-init:
+        condition: service_completed_successfully
 
 volumes:
   admincond_pgdata:
+  admincond_receipts:
