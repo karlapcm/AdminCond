@@ -1038,3 +1038,175 @@ h3 {
     flex-wrap: wrap;
   }
 }
+
+
+/* =======================================
+   DÍA 14 — UNIDADES
+======================================= */
+
+.units-section {
+  margin-top: 35px;
+}
+
+.units-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 17px;
+}
+
+.unit-card {
+  background: #ffffff;
+  border: 1px solid #e1eaed;
+  border-radius: 15px;
+  padding: 23px;
+  min-width: 0;
+}
+
+.unit-card-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+}
+
+.unit-card h3 {
+  font-size: 16px;
+  margin: 21px 0 12px;
+  overflow-wrap: anywhere;
+}
+
+.unit-card > p {
+  color: #83939c;
+  font-size: 12px;
+  line-height: 1.7;
+}
+
+.unit-card > p strong {
+  color: #2a4b55;
+}
+
+.unit-relationships {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 7px;
+  margin-top: 17px;
+}
+
+.unit-relationships span {
+  display: inline-flex;
+  padding: 7px 10px;
+  border-radius: 8px;
+  background: #eaf6f4;
+  color: #177c75;
+  font-size: 11px;
+  font-weight: 700;
+}
+
+@media (max-width: 1050px) {
+  .units-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 650px) {
+  .units-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
+
+/* =======================================
+   DÍA 14 — PERSONAS VINCULADAS A UNIDADES
+======================================= */
+
+.unit-people-section {
+  margin-top: 20px;
+  border-top: 1px solid #e7eff0;
+  padding-top: 15px;
+}
+
+.unit-people-button {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 11px 0;
+  background: transparent;
+  border: 0;
+  color: #0b8279;
+  font-size: 12px;
+  font-weight: 800;
+  text-align: left;
+}
+
+.unit-people-button > span {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+}
+
+.unit-people-list {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  margin-top: 14px;
+}
+
+.unit-person {
+  display: flex;
+  align-items: flex-start;
+  gap: 11px;
+  padding: 13px;
+  border-radius: 11px;
+  background: #f5f9fa;
+  border: 1px solid #e5eeee;
+}
+
+.unit-person-avatar {
+  width: 35px;
+  height: 35px;
+  border-radius: 50%;
+  display: grid;
+  place-items: center;
+  flex-shrink: 0;
+  color: #117a74;
+  background: #ddf2ed;
+}
+
+.unit-person-content {
+  min-width: 0;
+  flex: 1;
+}
+
+.unit-person-content > strong {
+  display: block;
+  font-size: 13px;
+  color: #23434c;
+  overflow-wrap: anywhere;
+}
+
+.unit-person-content .unit-relationships {
+  margin-top: 9px;
+}
+
+.unit-people-message,
+.unit-people-error {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  font-size: 12px;
+  line-height: 1.6;
+  margin: 12px 0 0;
+}
+
+.unit-people-message {
+  color: #738b95;
+}
+
+.unit-people-error {
+  color: #b24343;
+  padding: 11px;
+  background: #fff3f1;
+  border-radius: 9px;
+}

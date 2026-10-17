@@ -13,6 +13,7 @@ import {
 
 import { useAuth } from "../context/useAuth";
 import { getCondominiumById } from "../services/condominiums";
+import CondominiumUnits from "../components/CondominiumUnits";
 
 export default function CondominiumDetail() {
   const { condominioId } = useParams();
@@ -165,10 +166,15 @@ export default function CondominiumDetail() {
               </div>
             </section>
 
+            <CondominiumUnits
+              key={condominioId}
+              condominiumId={condominioId}
+            />
+
             <div className="detail-info">
-              Esta pantalla muestra únicamente información de consulta.
-              La gestión de unidades, residentes y finanzas se añadirá
-              en las siguientes etapas.
+              Ya puedes consultar las unidades autorizadas de este
+              condominio. La gestión de residentes, asignaciones y
+              operaciones administrativas se integrará posteriormente.
             </div>
           </>
         ) : null}
