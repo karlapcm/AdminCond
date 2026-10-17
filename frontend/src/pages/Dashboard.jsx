@@ -16,6 +16,7 @@ import {
   Users,
   Wallet,
   X,
+  UserRoundPlus,
 } from "lucide-react";
 
 import { useAuth } from "../context/useAuth";
@@ -143,6 +144,15 @@ export default function Dashboard() {
             <Building2 size={19} />
             <span>Mis condominios</span>
           </a>
+
+          <Link
+            to="/invitations"
+            className="nav-link"
+            onClick={() => setMenuOpen(false)}
+          >
+            <UserRoundPlus size={19} />
+            <span>Invitaciones</span>
+          </Link>
 
           <div className="nav-link disabled">
             <Users size={19} />
