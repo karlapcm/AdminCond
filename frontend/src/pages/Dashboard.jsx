@@ -33,11 +33,6 @@ const modules = [
     description: "Consulta las operaciones financieras autorizadas.",
     icon: CreditCard,
   },
-  {
-    title: "Comunicados",
-    description: "Próximamente: avisos para tu comunidad.",
-    icon: Bell,
-  },
 ];
 
 export default function Dashboard() {
@@ -152,6 +147,15 @@ export default function Dashboard() {
           >
             <UserRoundPlus size={19} />
             <span>Invitaciones</span>
+          </Link>
+          
+          <Link
+            to="/communications"
+            className="nav-link"
+            onClick={() => setMenuOpen(false)}
+          >
+            <Bell size={19} />
+            <span>Comunicados</span>
           </Link>
 
           <div className="nav-link disabled">

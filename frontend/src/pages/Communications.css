@@ -1,0 +1,348 @@
+
+.communications-page {
+  min-height: 100vh;
+  padding: 32px 20px 64px;
+  background: #f4f7fb;
+  color: #17253b;
+}
+
+.communications-container {
+  max-width: 1040px;
+  margin: 0 auto;
+}
+
+.communications-header {
+  margin-bottom: 28px;
+}
+
+.communications-back {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  color: #435c7a;
+  text-decoration: none;
+  font-weight: 600;
+  margin-bottom: 26px;
+}
+
+.communications-back:hover {
+  color: #1365b2;
+}
+
+.communications-heading {
+  display: flex;
+  gap: 17px;
+  align-items: center;
+}
+
+.communications-heading-icon {
+  width: 62px;
+  height: 62px;
+  border-radius: 18px;
+  background: #dceafa;
+  color: #195b9f;
+  display: grid;
+  place-items: center;
+}
+
+.communications-kicker {
+  font-size: 12px;
+  font-weight: 800;
+  letter-spacing: 1px;
+  color: #4e759d;
+}
+
+.communications-heading h1 {
+  margin: 5px 0;
+  font-size: clamp(27px, 4vw, 36px);
+}
+
+.communications-heading p,
+.communications-muted {
+  color: #68788d;
+}
+
+.communications-panel {
+  margin-bottom: 22px;
+  padding: 26px;
+  background: #fff;
+  border: 1px solid #e0e7f0;
+  border-radius: 18px;
+  box-shadow: 0 5px 22px rgba(20, 41, 69, 0.04);
+}
+
+.communications-section-title {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  color: #245b92;
+}
+
+.communications-section-title h2 {
+  color: #17253b;
+  margin: 0;
+  font-size: 19px;
+}
+
+.communications-selector-row {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 14px;
+  margin-top: 18px;
+}
+
+.communications-select {
+  flex: 1;
+  min-width: 220px;
+  padding: 12px 14px;
+  border: 1px solid #cbd7e5;
+  border-radius: 10px;
+  background: #fff;
+  color: #17253b;
+  font: inherit;
+}
+
+.communications-role {
+  border-radius: 999px;
+  background: #e8f0fa;
+  color: #23598d;
+  padding: 8px 13px;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.communications-form {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin-top: 21px;
+}
+
+.communications-form label {
+  font-size: 14px;
+  font-weight: 700;
+}
+
+.communications-form input,
+.communications-form textarea {
+  width: 100%;
+  box-sizing: border-box;
+  border: 1px solid #cbd7e5;
+  background: #fff;
+  border-radius: 10px;
+  color: #17253b;
+  font: inherit;
+  padding: 13px 14px;
+}
+
+.communications-form textarea {
+  resize: vertical;
+  line-height: 1.6;
+}
+
+.communications-form input:focus,
+.communications-form textarea:focus,
+.communications-select:focus {
+  outline: 2px solid #a2c6ef;
+  outline-offset: 2px;
+}
+
+.communications-counter {
+  align-self: flex-end;
+  font-size: 12px;
+  color: #74849a;
+}
+
+.communications-primary-button,
+.communications-refresh,
+.communications-detail-button,
+.communications-icon-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  cursor: pointer;
+  font: inherit;
+}
+
+.communications-primary-button {
+  align-self: flex-start;
+  margin-top: 9px;
+  padding: 12px 19px;
+  border: none;
+  border-radius: 10px;
+  background: #2469ae;
+  color: #fff;
+  font-weight: 700;
+}
+
+.communications-primary-button:hover {
+  background: #19558f;
+}
+
+.communications-primary-button:disabled,
+.communications-refresh:disabled,
+.communications-detail-button:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.communications-list-heading,
+.communications-card-top,
+.communications-card-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+}
+
+.communications-refresh,
+.communications-detail-button,
+.communications-icon-button {
+  background: #f1f6fc;
+  color: #245b92;
+  border: 1px solid #d8e5f2;
+  border-radius: 9px;
+  padding: 9px 13px;
+  font-weight: 600;
+}
+
+.communications-list {
+  display: grid;
+  gap: 16px;
+  margin-top: 21px;
+}
+
+.communications-card {
+  padding: 21px;
+  border: 1px solid #dce6f0;
+  border-radius: 14px;
+  background: #fbfdff;
+}
+
+.communications-card h3 {
+  margin: 0;
+  font-size: 18px;
+}
+
+.communications-tag {
+  flex-shrink: 0;
+  padding: 5px 10px;
+  border-radius: 999px;
+  color: #23704e;
+  background: #e4f6ec;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.communications-preview,
+.communications-detail-content {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  line-height: 1.7;
+}
+
+.communications-preview {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 3;
+  overflow: hidden;
+  color: #4e6075;
+}
+
+.communications-detail-content {
+  margin-top: 20px;
+}
+
+.communications-card-footer {
+  flex-wrap: wrap;
+  color: #718198;
+  font-size: 12px;
+  margin: 16px 0;
+}
+
+.communications-card-footer span {
+  display: inline-flex;
+  gap: 6px;
+  align-items: center;
+}
+
+.communications-empty {
+  margin-top: 22px;
+  text-align: center;
+  padding: 35px 15px;
+  border: 1px dashed #cbd7e5;
+  border-radius: 12px;
+  color: #718198;
+}
+
+.communications-empty h3 {
+  color: #253c55;
+}
+
+.communications-alert {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  margin: 15px 0;
+  padding: 13px 15px;
+  border-radius: 10px;
+  overflow-wrap: anywhere;
+}
+
+.communications-alert.error {
+  background: #fff0f0;
+  color: #a42c37;
+}
+
+.communications-alert.success {
+  background: #eaf8ef;
+  color: #216c42;
+}
+
+.communications-muted {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  line-height: 1.6;
+}
+
+.communications-spin {
+  animation: communications-rotate 1s linear infinite;
+}
+
+@keyframes communications-rotate {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@media (max-width: 640px) {
+  .communications-page {
+    padding: 20px 12px 40px;
+  }
+
+  .communications-panel {
+    padding: 18px;
+  }
+
+  .communications-heading {
+    align-items: flex-start;
+  }
+
+  .communications-heading-icon {
+    width: 48px;
+    height: 48px;
+    flex-shrink: 0;
+  }
+
+  .communications-list-heading {
+    align-items: flex-start;
+    flex-wrap: wrap;
+  }
+
+  .communications-card-top {
+    align-items: flex-start;
+  }
+}

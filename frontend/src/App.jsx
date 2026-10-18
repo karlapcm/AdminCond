@@ -13,6 +13,7 @@ import Login from "./pages/Login";
 import Dashboard from "./pages/Dashboard";
 import CondominiumDetail from "./pages/CondominiumDetail";
 import Invitations from "./pages/Invitations";
+import Communications from "./pages/Communications";
 
 export default function App() {
   return (
@@ -35,6 +36,11 @@ export default function App() {
             <Route
               path="/invitations"
               element={<Invitations />}
+            />
+
+            <Route
+              path="/communications"
+              element={<Communications />}
             />
           </Route>
 
