@@ -13,6 +13,7 @@ import { invitationRouter } from "./modules/invitations/invitation.routes.js";
 import { financeRouter } from "./modules/finance/finance.routes.js";
 import { receiptRouter } from "./modules/finance/receipt.routes.js";
 import { communicationRouter } from "./modules/communications/communication.routes.js";
+import { reservationRouter } from "./modules/reservations/reservation.routes.js";
 
 const app = express();
 
@@ -59,6 +60,7 @@ app.use("/api/invitations", invitationRouter);
 app.use("/api/finance", financeRouter);
 app.use("/api/finance/receipts", receiptRouter);
 app.use("/api/communications", communicationRouter);
+app.use("/api/reservations", reservationRouter);
 
 // Rutas inexistentes
 app.use((_req, res) => {
