@@ -14,6 +14,7 @@ import Dashboard from "./pages/Dashboard";
 import CondominiumDetail from "./pages/CondominiumDetail";
 import Invitations from "./pages/Invitations";
 import Communications from "./pages/Communications";
+import Reservations from "./pages/Reservations";
 
 export default function App() {
   return (
@@ -49,6 +50,11 @@ export default function App() {
             element={
               <Navigate to="/dashboard" replace />
             }
+          />
+
+          <Route
+            path="/reservations"
+            element={<Reservations />}
           />
         </Routes>
       </AuthProvider>

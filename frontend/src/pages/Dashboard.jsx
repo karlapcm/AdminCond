@@ -17,6 +17,7 @@ import {
   Wallet,
   X,
   UserRoundPlus,
+  CalendarDays,
 } from "lucide-react";
 
 import { useAuth } from "../context/useAuth";
@@ -147,6 +148,15 @@ export default function Dashboard() {
           >
             <UserRoundPlus size={19} />
             <span>Invitaciones</span>
+          </Link>
+          
+          <Link
+            to="/reservations"
+            className="nav-link"
+            onClick={() => setMenuOpen(false)}
+          >
+            <CalendarDays size={19} />
+            <span>Reservas</span>
           </Link>
           
           <Link
