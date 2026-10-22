@@ -44,7 +44,7 @@ jobs:
         run: npm ci
 
       - name: Iniciar PostgreSQL TEST aislado
-        run: docker compose -f compose.test.yaml up -d postgres-test
+        run: docker compose -f compose.test.yaml up -d --wait postgres-test
         
       - name: Crear esquema, roles y migraciones de TEST
         shell: bash
@@ -67,7 +67,7 @@ jobs:
             -c 'GRANT admincond_app TO admincond_test_api;'
 
       - name: Iniciar API de TEST
-        run: docker compose -f compose.test.yaml up -d --wait postgres-test
+        run: docker compose -f compose.test.yaml up -d --build --wait api-test
 
       - name: Comprobar disponibilidad de API de TEST
         shell: bash
