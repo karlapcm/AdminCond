@@ -1,6 +1,6 @@
 
 import { useCallback, useEffect, useState } from "react";
-import { Link } from "react-router-dom";
+import { Link, useSearchParams } from "react-router-dom";
 import {
   ArrowLeft,
   CalendarDays,
@@ -653,6 +653,8 @@ function ReservationsWorkspace({
 
 export default function Reservations() {
   const { request } = useAuth();
+  const [searchParams] = useSearchParams();
+  const requestedCondominiumId = searchParams.get("condominioId");
 
   const [condominiums, setCondominiums] = useState([]);
   const [units, setUnits] = useState([]);
@@ -678,7 +680,14 @@ export default function Reservations() {
         setUnits(unitData);
 
         if (condoData.length) {
-          setSelectedId(String(condoData[0].id));
+          const authorizedCondominium = condoData.find(
+            (condo) =>
+              String(condo.id) === requestedCondominiumId
+          );
+
+          setSelectedId(
+            String(authorizedCondominium?.id ?? condoData[0].id)
+          );
         }
       } catch (err) {
         if (active) {
@@ -697,7 +706,7 @@ export default function Reservations() {
     return () => {
       active = false;
     };
-  }, [request]);
+  }, [request, requestedCondominiumId]);
 
   const selectedCondominium = condominiums.find(
     (condo) => String(condo.id) === String(selectedId)

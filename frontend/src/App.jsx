@@ -43,18 +43,16 @@ export default function App() {
               path="/communications"
               element={<Communications />}
             />
+
+            <Route
+              path="/reservations"
+              element={<Reservations />}
+            />
           </Route>
 
           <Route
             path="*"
-            element={
-              <Navigate to="/dashboard" replace />
-            }
-          />
-
-          <Route
-            path="/reservations"
-            element={<Reservations />}
+            element={<Navigate to="/dashboard" replace />}
           />
         </Routes>
       </AuthProvider>

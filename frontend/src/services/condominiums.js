@@ -20,3 +20,25 @@ export async function getCondominiumById(request, id) {
 
   return response.condominio;
 }
+
+export async function getCondominiumContext(request, condominiumId) {
+  if (!/^[1-9]\d*$/.test(String(condominiumId))) {
+    throw new Error("ID de condominio inválido.");
+  }
+
+  const response = await request(
+    `/api/condominiums/${encodeURIComponent(condominiumId)}/context`
+  );
+
+  if (
+    !response?.contexto ||
+    String(response.contexto.condominioId) !== String(condominiumId) ||
+    !Array.isArray(response.contexto.unidades)
+  ) {
+    throw new Error(
+      "El servidor devolvió un contexto de condominio inválido."
+    );
+  }
+
+  return response.contexto;
+}

@@ -1,6 +1,6 @@
 
 import { useEffect, useState } from "react";
-import { Link } from "react-router-dom";
+import { Link, useSearchParams } from "react-router-dom";
 import {
   ArrowLeft,
   Bell,
@@ -41,6 +41,8 @@ function formatDate(value) {
 
 export default function Communications() {
   const { request } = useAuth();
+  const [searchParams] = useSearchParams();
+  const requestedCondominiumId = searchParams.get("condominioId");
 
   const [condominiums, setCondominiums] = useState([]);
   const [selectedId, setSelectedId] = useState("");
@@ -81,8 +83,15 @@ export default function Communications() {
         if (!active) return;
 
         setCondominiums(result);
+        const authorizedCondominium = result.find(
+          (condo) =>
+            String(condo.id) === requestedCondominiumId
+        );
+
         setSelectedId(
-          result.length > 0 ? String(result[0].id) : ""
+          result.length > 0
+            ? String(authorizedCondominium?.id ?? result[0].id)
+            : ""
         );
       } catch (err) {
         if (active) {
@@ -103,7 +112,7 @@ export default function Communications() {
     return () => {
       active = false;
     };
-  }, [request]);
+  }, [request, requestedCondominiumId]);
 
   // Actualizar comunicados al cambiar de condominio.
   useEffect(() => {

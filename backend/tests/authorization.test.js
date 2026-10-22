@@ -368,3 +368,41 @@ test("D20-23: administrador sí puede registrar un área", async () => {
   assert.equal(response.status, 201, JSON.stringify(body));
   assert.equal(body.area.nombre, `NEW-AREA-${marker}`);
 });
+
+test("D23-01: administrador consulta su contexto autorizado", async () => {
+  const response = await send(
+    `/api/condominiums/${ids.condo}/context`,
+    "admin"
+  );
+
+  const body = await response.json();
+
+  assert.equal(response.status, 200, JSON.stringify(body));
+  assert.equal(body.contexto.rolCliente, "colaborador");
+  assert.equal(body.contexto.rolCondominio, "administrador");
+  assert.equal(String(body.contexto.condominioId), String(ids.condo));
+  assert.deepEqual(body.contexto.unidades, []);
+});
+
+test("D23-02: residente consulta solamente sus relaciones", async () => {
+  const response = await send(
+    `/api/condominiums/${ids.condo}/context`,
+    "resident"
+  );
+
+  const body = await response.json();
+
+  assert.equal(response.status, 200, JSON.stringify(body));
+  assert.equal(body.contexto.rolCondominio, "residente");
+  assert.equal(body.contexto.unidades.length, 1);
+  assert.equal(body.contexto.unidades[0].esOcupante, true);
+});
+
+test("D23-03: usuario externo no consulta el contexto ajeno", async () => {
+  const response = await send(
+    `/api/condominiums/${ids.condo}/context`,
+    "outsider"
+  );
+
+  assert.equal(response.status, 404);
+});

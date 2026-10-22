@@ -104,3 +104,84 @@ condominiumRouter.get(
     }
   }
 );
+
+/**
+ * GET /api/condominiums/:condominioId/context
+ *
+ * Consulta el contexto del usuario autenticado.
+ * No concede permisos ni modifica datos.
+ */
+condominiumRouter.get(
+  "/:condominioId/context",
+  requireCondominiumAccess,
+  async (req, res, next) => {
+    try {
+      const usuarioId = req.user.id;
+      const condominioId = req.condominium.id;
+      const clienteId = req.condominium.cliente_id;
+
+      const membresias = await pool.query(
+        `SELECT
+           (
+             SELECT mc.rol
+             FROM admincond.membresias_cliente mc
+             WHERE mc.usuario_id = $1
+               AND mc.cliente_id = $2
+               AND mc.estado = 'activo'
+           ) AS rol_cliente,
+           (
+             SELECT mco.rol
+             FROM admincond.membresias_condominio mco
+             WHERE mco.usuario_id = $1
+               AND mco.cliente_id = $2
+               AND mco.condominio_id = $3
+               AND mco.estado = 'activo'
+           ) AS rol_condominio`,
+        [usuarioId, clienteId, condominioId]
+      );
+
+      const unidades = await pool.query(
+        `SELECT
+           u.id AS unidad_id,
+           u.codigo,
+           ru.es_propietario,
+           ru.es_inquilino,
+           ru.es_ocupante,
+           ru.responsable_pago,
+           ru.es_principal
+         FROM admincond.relaciones_unidad ru
+         JOIN admincond.unidades u
+           ON u.id = ru.unidad_id
+          AND u.condominio_id = ru.condominio_id
+         WHERE ru.usuario_id = $1
+           AND ru.condominio_id = $2
+           AND ru.estado = 'activo'
+           AND u.estado = 'activa'
+         ORDER BY u.codigo`,
+        [usuarioId, condominioId]
+      );
+
+      res.json({
+        contexto: {
+          clienteId,
+          condominioId,
+          condominioNombre: req.condominium.nombre,
+          rolCliente: membresias.rows[0].rol_cliente,
+          rolCondominio: membresias.rows[0].rol_condominio,
+          unidades: unidades.rows.map((unidad) => ({
+            unidadId: unidad.unidad_id,
+            codigo: unidad.codigo,
+            esPropietario: unidad.es_propietario,
+            esInquilino: unidad.es_inquilino,
+            esOcupante: unidad.es_ocupante,
+            responsablePago: unidad.responsable_pago,
+            esPrincipal: unidad.es_principal,
+          })),
+        },
+      });
+    } catch (error) {
+      next(error);
+    }
+  }
+);
+
