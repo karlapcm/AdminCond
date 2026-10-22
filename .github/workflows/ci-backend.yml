@@ -1,0 +1,95 @@
+name: AdminCond Backend Tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  backend-tests:
+    name: Backend - 23 pruebas
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Descargar repositorio
+        uses: actions/checkout@v4
+
+      - name: Configurar Node.js 24
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: backend/package-lock.json
+
+      - name: Preparar credenciales efimeras de TEST
+        shell: bash
+        run: |
+          set -euo pipefail
+          DB_PASSWORD="$(openssl rand -hex 24)"
+          JWT_SECRET="$(openssl rand -hex 48)"
+          echo "::add-mask::$DB_PASSWORD"
+          echo "::add-mask::$JWT_SECRET"
+          echo "POSTGRES_PASSWORD=$DB_PASSWORD" >> "$GITHUB_ENV"
+          echo "TEST_DB_PASSWORD=$DB_PASSWORD" >> "$GITHUB_ENV"
+          printf 'DB_HOST=postgres-test\nDB_PORT=5432\nDB_NAME=admincond_test\nDB_USER=admincond_test_api\nDB_PASSWORD=%s\nJWT_SECRET=%s\n' "$DB_PASSWORD" "$JWT_SECRET" > backend/.env.test
+          chmod 600 backend/.env.test
+
+      - name: Instalar dependencias de tests
+        working-directory: backend
+        run: npm ci
+
+      - name: Iniciar PostgreSQL TEST aislado
+        run: docker compose -f compose.test.yaml up -d postgres-test
+        
+      - name: Crear esquema, roles y migraciones de TEST
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker compose -f compose.test.yaml exec -T postgres-test \
+            psql -X -v ON_ERROR_STOP=1 -U postgres -d admincond_test \
+            < backend/sql/test/000_bootstrap_test.sql
+          for migration in backend/sql/00[1-8]_*.sql; do
+            echo "Aplicando $(basename "$migration")"
+            docker compose -f compose.test.yaml exec -T postgres-test \
+              psql -X -v ON_ERROR_STOP=1 -U postgres -d admincond_test \
+              < "$migration"
+          done
+          docker compose -f compose.test.yaml exec -T postgres-test \
+            psql -X -v ON_ERROR_STOP=1 -U postgres -d admincond_test \
+            -c "CREATE ROLE admincond_test_api LOGIN PASSWORD '${TEST_DB_PASSWORD}';"
+          docker compose -f compose.test.yaml exec -T postgres-test \
+            psql -X -v ON_ERROR_STOP=1 -U postgres -d admincond_test \
+            -c 'GRANT admincond_app TO admincond_test_api;'
+
+      - name: Iniciar API de TEST
+        run: docker compose -f compose.test.yaml up -d --build api-test
+
+      - name: Comprobar disponibilidad de API de TEST
+        shell: bash
+        run: |
+          set -euo pipefail
+          for i in $(seq 1 30); do
+            if curl --fail --silent http://127.0.0.1:3001/api/health/db > /dev/null; then
+              exit 0
+            fi
+            sleep 2
+          done
+          docker compose -f compose.test.yaml logs --no-color api-test
+          exit 1
+
+      - name: Ejecutar suite de backend
+        working-directory: backend
+        run: npm test
+
+      - name: Mostrar logs si falla
+        if: failure()
+        run: docker compose -f compose.test.yaml logs --no-color --tail=100 api-test postgres-test
+
+      - name: Detener servicios TEST
+        if: always()
+        run: docker compose -f compose.test.yaml down
