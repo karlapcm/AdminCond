@@ -42,6 +42,7 @@ services:
       DB_PORT: 5432
       DB_NAME: admincond_test
       DB_USER: admincond_test_api
+      RECEIPTS_DIR: /tmp/admincond-test-receipts
 
     ports:
       - "127.0.0.1:3001:3000"

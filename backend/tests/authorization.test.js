@@ -349,6 +349,21 @@ after(() => {
         WHERE nombre LIKE '%${marker}'
       );
 
+      DELETE FROM admincond.comprobantes
+      WHERE pago_id IN (
+        SELECT p.id
+        FROM admincond.pagos p
+        JOIN admincond.condominios c
+          ON c.id = p.condominio_id
+        WHERE c.nombre LIKE '%${marker}'
+      );
+
+      DELETE FROM admincond.pagos
+      WHERE condominio_id IN (
+        SELECT id FROM admincond.condominios
+        WHERE nombre LIKE '%${marker}'
+      );
+
       DELETE FROM admincond.cuotas
       WHERE condominio_id IN (
         SELECT id FROM admincond.condominios
@@ -959,4 +974,473 @@ test("D28-03: permiso financiero activo permite crear y revocado bloquea", async
   );
 
   assert.equal(revoked.status, 404);
+});
+
+
+test("D29-01: residente reporta su pago y usuario externo es rechazado", async () => {
+  // Crear una cuota temporal para la Unidad A.
+  const cuotaId = sql(`
+    INSERT INTO admincond.cuotas (
+      condominio_id,
+      unidad_id,
+      concepto,
+      periodo,
+      monto,
+      vencimiento,
+      creada_por
+    )
+    SELECT
+      u.condominio_id,
+      u.id,
+      'Pago manual D29-${marker}',
+      '2027-02-01',
+      200.00,
+      '2027-02-28',
+      ${ids.admin}
+    FROM admincond.unidades u
+    WHERE u.codigo = 'UNIT-A-${marker}'
+      AND u.condominio_id = ${ids.condo}
+    RETURNING id;
+  `);
+
+  assert.match(cuotaId, /^\d+$/);
+
+  // Un residente vinculado a la Unidad A reporta S/ 100.
+  const authorized = await send(
+    "/api/finance/payments",
+    "resident",
+    {
+      method: "POST",
+      body: JSON.stringify({
+        cuotaId: Number(cuotaId),
+        monto: "100.00",
+        referencia: "TRANSFERENCIA-D29-TEST",
+      }),
+    }
+  );
+
+  const body = await authorized.json();
+
+  assert.equal(authorized.status, 201, JSON.stringify(body));
+  assert.equal(String(body.pago.cuota_id), cuotaId);
+  assert.equal(Number(body.pago.monto), 100);
+  assert.equal(body.pago.estado, "pendiente");
+
+  // Un usuario del Cliente B intenta pagar esa misma cuota.
+  const unauthorized = await send(
+    "/api/finance/payments",
+    "outsider",
+    {
+      method: "POST",
+      body: JSON.stringify({
+        cuotaId: Number(cuotaId),
+        monto: "50.00",
+        referencia: "PAGO-AJENO-D29",
+      }),
+    }
+  );
+
+  assert.equal(unauthorized.status, 404);
+});
+
+
+test("D29-02: revisar pagos exige permiso financiero y actualiza saldo", async () => {
+  // Crear una cuota temporal de S/ 200 para la Unidad A.
+  const cuotaId = sql(`
+    INSERT INTO admincond.cuotas (
+      condominio_id,
+      unidad_id,
+      concepto,
+      periodo,
+      monto,
+      vencimiento,
+      creada_por
+    )
+    SELECT
+      u.condominio_id,
+      u.id,
+      'Revision de pago D29-${marker}',
+      '2027-03-01',
+      200.00,
+      '2027-03-31',
+      ${ids.admin}
+    FROM admincond.unidades u
+    WHERE u.codigo = 'UNIT-A-${marker}'
+      AND u.condominio_id = ${ids.condo}
+    RETURNING id;
+  `);
+
+  assert.match(cuotaId, /^\d+$/);
+
+  // El residente reporta un pago parcial de S/ 50.
+  const paymentResponse = await send(
+    "/api/finance/payments",
+    "resident",
+    {
+      method: "POST",
+      body: JSON.stringify({
+        cuotaId: Number(cuotaId),
+        monto: "50.00",
+        referencia: "PAGO-REVISION-D29",
+      }),
+    }
+  );
+
+  const paymentBody = await paymentResponse.json();
+
+  assert.equal(
+    paymentResponse.status,
+    201,
+    JSON.stringify(paymentBody)
+  );
+
+  const pagoId = paymentBody.pago.id;
+
+  assert.equal(paymentBody.pago.estado, "pendiente");
+
+  // 1. El administrador no tiene permiso de revisión.
+  const denied = await send(
+    `/api/finance/payments/${pagoId}/review`,
+    "admin",
+    {
+      method: "POST",
+      body: JSON.stringify({
+        decision: "aprobar",
+      }),
+    }
+  );
+
+  assert.equal(denied.status, 404);
+
+  // 2. Otorgar permiso financiero explícito.
+  sql(`
+    INSERT INTO admincond.permisos_financieros (
+      usuario_id,
+      condominio_id,
+      permiso,
+      otorgado_por
+    )
+    VALUES (
+      ${ids.admin},
+      ${ids.condo},
+      'revisar_pagos',
+      ${ids.admin}
+    );
+  `);
+
+  // 3. Ahora el administrador sí puede aprobar el pago.
+  const approved = await send(
+    `/api/finance/payments/${pagoId}/review`,
+    "admin",
+    {
+      method: "POST",
+      body: JSON.stringify({
+        decision: "aprobar",
+      }),
+    }
+  );
+
+  const approvedBody = await approved.json();
+
+  assert.equal(
+    approved.status,
+    200,
+    JSON.stringify(approvedBody)
+  );
+
+  assert.equal(approvedBody.estado, "aprobado");
+  assert.equal(Number(approvedBody.saldo), 150);
+
+  // 4. Comprobar el estado persistido en PostgreSQL.
+  const cuotaEstado = sql(`
+    SELECT estado
+    FROM admincond.cuotas
+    WHERE id = ${cuotaId};
+  `);
+
+  assert.equal(cuotaEstado, "parcial");
+
+  const pagoEstado = sql(`
+    SELECT estado
+    FROM admincond.pagos
+    WHERE id = ${pagoId};
+  `);
+
+  assert.equal(pagoEstado, "aprobado");
+
+  // 5. El mismo pago no puede aprobarse dos veces.
+  const repeated = await send(
+    `/api/finance/payments/${pagoId}/review`,
+    "admin",
+    {
+      method: "POST",
+      body: JSON.stringify({
+        decision: "aprobar",
+      }),
+    }
+  );
+
+  assert.equal(repeated.status, 409);
+});
+
+
+test("D29-03: usuario externo no puede descargar comprobantes ajenos", async () => {
+  // Crear una cuota para la Unidad A.
+  const cuotaId = sql(`
+    INSERT INTO admincond.cuotas (
+      condominio_id,
+      unidad_id,
+      concepto,
+      periodo,
+      monto,
+      vencimiento,
+      creada_por
+    )
+    SELECT
+      u.condominio_id,
+      u.id,
+      'Comprobante D29-${marker}',
+      '2027-04-01',
+      100.00,
+      '2027-04-30',
+      ${ids.admin}
+    FROM admincond.unidades u
+    WHERE u.codigo = 'UNIT-A-${marker}'
+      AND u.condominio_id = ${ids.condo}
+    RETURNING id;
+  `);
+
+  assert.match(cuotaId, /^\d+$/);
+
+  // El residente registra un pago manual.
+  const paymentResponse = await send(
+    "/api/finance/payments",
+    "resident",
+    {
+      method: "POST",
+      body: JSON.stringify({
+        cuotaId: Number(cuotaId),
+        monto: "100.00",
+        referencia: "COMPROBANTE-D29-TEST",
+      }),
+    }
+  );
+
+  const paymentBody = await paymentResponse.json();
+
+  assert.equal(
+    paymentResponse.status,
+    201,
+    JSON.stringify(paymentBody)
+  );
+
+  const pagoId = paymentBody.pago.id;
+
+  // Crear metadatos temporales para probar la autorización
+  // sin almacenar ni descargar un archivo real.
+  const comprobanteId = sql(`
+    INSERT INTO admincond.comprobantes (
+      pago_id,
+      almacenamiento_clave,
+      nombre_original,
+      tipo_mime,
+      tamano_bytes,
+      subido_por
+    )
+    VALUES (
+      ${pagoId},
+      '${randomUUID()}.pdf',
+      'comprobante-test.pdf',
+      'application/pdf',
+      100,
+      ${ids.resident}
+    )
+    RETURNING id;
+  `);
+
+  assert.match(comprobanteId, /^\d+$/);
+
+  // Un usuario del Cliente B intenta descargarlo.
+  const unauthorized = await send(
+    `/api/finance/receipts/${comprobanteId}`,
+    "outsider"
+  );
+
+  assert.equal(unauthorized.status, 404);
+});
+
+
+test("D29-04: comprobante real permite descarga autorizada y bloquea externos", async () => {
+  // 1. Crear una cuota temporal en la Unidad A.
+  const cuotaId = sql(`
+    INSERT INTO admincond.cuotas (
+      condominio_id,
+      unidad_id,
+      concepto,
+      periodo,
+      monto,
+      vencimiento,
+      creada_por
+    )
+    SELECT
+      u.condominio_id,
+      u.id,
+      'Archivo real D29-${marker}',
+      '2027-05-01',
+      100.00,
+      '2027-05-31',
+      ${ids.admin}
+    FROM admincond.unidades u
+    WHERE u.codigo = 'UNIT-A-${marker}'
+      AND u.condominio_id = ${ids.condo}
+    RETURNING id;
+  `);
+
+  assert.match(cuotaId, /^\d+$/);
+
+  // 2. El residente reporta el pago.
+  const paymentResponse = await send(
+    "/api/finance/payments",
+    "resident",
+    {
+      method: "POST",
+      body: JSON.stringify({
+        cuotaId: Number(cuotaId),
+        monto: "100.00",
+        referencia: "ARCHIVO-REAL-D29",
+      }),
+    }
+  );
+
+  const paymentBody = await paymentResponse.json();
+
+  assert.equal(
+    paymentResponse.status,
+    201,
+    JSON.stringify(paymentBody)
+  );
+
+  const pagoId = paymentBody.pago.id;
+
+  // PNG mínimo para pruebas: no contiene datos reales.
+  const png = Buffer.from(
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJ" +
+    "AAAADUlEQVQIHWP4z8DwHwAFgAI/ScL/nwAAAABJRU5ErkJggg==",
+    "base64"
+  );
+
+  // 3. Preparar el archivo multipart/form-data.
+  const form = new FormData();
+
+  form.append(
+    "comprobante",
+    new Blob([png], { type: "image/png" }),
+    "comprobante-d29.png"
+  );
+
+  let storageKey;
+
+  try {
+    // Usamos fetch directamente porque send() agrega
+    // Content-Type: application/json cuando hay body.
+    // En FormData, fetch debe generar el boundary.
+    const uploadResponse = await fetch(
+      `${url}/api/finance/receipts/payments/${pagoId}`,
+      {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${tokens.resident}`,
+        },
+        body: form,
+      }
+    );
+
+    const uploadBody = await uploadResponse.json();
+
+    assert.equal(
+      uploadResponse.status,
+      201,
+      JSON.stringify(uploadBody)
+    );
+
+    const comprobanteId = uploadBody.comprobante.id;
+
+    assert.equal(
+      uploadBody.comprobante.tipo_mime,
+      "image/png"
+    );
+
+    // Buscar la clave generada por el backend para
+    // limpiar posteriormente el archivo temporal.
+    storageKey = sql(`
+      SELECT almacenamiento_clave
+      FROM admincond.comprobantes
+      WHERE id = ${comprobanteId};
+    `);
+
+    assert.match(
+      storageKey,
+      /^[a-f0-9-]{36}\.png$/
+    );
+
+    // 4. El residente descarga su comprobante.
+    const authorized = await send(
+      `/api/finance/receipts/${comprobanteId}`,
+      "resident"
+    );
+
+    assert.equal(authorized.status, 200);
+
+    assert.match(
+      authorized.headers.get("content-type") || "",
+      /^image\/png/
+    );
+
+    assert.equal(
+      authorized.headers.get("cache-control"),
+      "no-store"
+    );
+
+    const downloaded = Buffer.from(
+      await authorized.arrayBuffer()
+    );
+
+    assert.deepEqual(
+      downloaded,
+      png,
+      "El archivo descargado debe coincidir con el original"
+    );
+
+    // 5. Un usuario de otro cliente no puede descargarlo.
+    const outsider = await send(
+      `/api/finance/receipts/${comprobanteId}`,
+      "outsider"
+    );
+
+    assert.equal(outsider.status, 404);
+  } finally {
+    // Eliminar solamente el archivo que generó esta prueba.
+    // La base de datos se limpia en el after() general.
+    if (storageKey) {
+      execFileSync(
+        docker,
+        [
+          "compose",
+          "-f",
+          "compose.test.yaml",
+          "exec",
+          "-T",
+          "api-test",
+          "rm",
+          "-f",
+          `/tmp/admincond-test-receipts/${storageKey}`,
+        ],
+        {
+          cwd: root,
+          encoding: "utf8",
+          timeout: 20000,
+        }
+      );
+    }
+  }
 });
