@@ -55,7 +55,14 @@ export default function Communications() {
 
   const [refreshKey, setRefreshKey] = useState(0);
 
-  const selectedId = selectedCondominiumId;
+  const requestedCondominium = condominiums.find(
+    (condo) =>
+      String(condo.id) === requestedCondominiumId
+  );
+
+  const selectedId = requestedCondominium
+    ? String(requestedCondominium.id)
+    : selectedCondominiumId;
 
   useEffect(() => {
   if (!requestedCondominiumId) return;

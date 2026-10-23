@@ -672,7 +672,14 @@ export default function Reservations() {
   const [unitsLoading, setUnitsLoading] = useState(true);
   const [unitsError, setUnitsError] = useState("");
 
-  const selectedId = selectedCondominiumId;
+  const requestedCondominium = condominiums.find(
+    (condo) =>
+      String(condo.id) === requestedCondominiumId
+  );
+
+  const selectedId = requestedCondominium
+    ? String(requestedCondominium.id)
+    : selectedCondominiumId;
   const loading = condominiumsLoading || unitsLoading;
   const error = condominiumsError || unitsError;
 
