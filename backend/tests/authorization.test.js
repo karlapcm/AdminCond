@@ -406,3 +406,91 @@ test("D23-03: usuario externo no consulta el contexto ajeno", async () => {
 
   assert.equal(response.status, 404);
 });
+
+test("D26-01: administrador consulta las unidades autorizadas", async () => {
+  const response = await send(
+    `/api/units/condominium/${ids.condo}`,
+    "admin"
+  );
+
+  const body = await response.json();
+
+  assert.equal(response.status, 200, JSON.stringify(body));
+  assert.equal(body.unidades.length, 2);
+  assert.ok(
+    body.unidades.every(
+      (unit) => String(unit.condominio_id) === String(ids.condo)
+    )
+  );
+});
+
+test("D26-02: residente no puede consultar personas de unidades", async () => {
+  const unitsResponse = await send(
+    `/api/units/condominium/${ids.condo}`,
+    "admin"
+  );
+
+  assert.equal(unitsResponse.status, 200);
+
+  const { unidades } = await unitsResponse.json();
+  const unitId = unidades.find(
+    (unit) => unit.codigo === `UNIT-B-${marker}`
+  )?.id;
+
+  assert.ok(unitId);
+
+  const response = await send(
+    `/api/units/${unitId}/people`,
+    "resident"
+  );
+
+  assert.equal(response.status, 404);
+});
+
+test("D26-03: usuario de otro cliente no consulta unidades ajenas", async () => {
+  const response = await send(
+    `/api/units/condominium/${ids.condo}`,
+    "outsider"
+  );
+
+  assert.equal(response.status, 404);
+});
+
+test("D26-04: administrador consulta personas de una unidad autorizada", async () => {
+  const unitsResponse = await send(
+    `/api/units/condominium/${ids.condo}`,
+    "admin"
+  );
+
+  assert.equal(unitsResponse.status, 200);
+
+  const { unidades } = await unitsResponse.json();
+
+  const unitId = unidades.find(
+    (unit) => unit.codigo === `UNIT-B-${marker}`
+  )?.id;
+
+  assert.ok(unitId);
+
+  const response = await send(
+    `/api/units/${unitId}/people`,
+    "admin"
+  );
+
+  const body = await response.json();
+
+  assert.equal(response.status, 200, JSON.stringify(body));
+  assert.equal(body.personas.length, 1);
+  assert.equal(body.personas[0].nombre, "Propietario TEST");
+});
+
+test("D26-05: residente consulta solamente sus unidades", async () => {
+  const response = await send("/api/units/mine", "resident");
+
+  const body = await response.json();
+
+  assert.equal(response.status, 200, JSON.stringify(body));
+  assert.equal(body.unidades.length, 1);
+  assert.equal(body.unidades[0].codigo, `UNIT-A-${marker}`);
+  assert.equal(body.unidades[0].es_ocupante, true);
+});
