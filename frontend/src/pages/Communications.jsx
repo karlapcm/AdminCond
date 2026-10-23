@@ -1,5 +1,4 @@
-
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Link, useSearchParams } from "react-router-dom";
 import {
   ArrowLeft,
@@ -15,7 +14,7 @@ import {
 } from "lucide-react";
 
 import { useAuth } from "../context/useAuth";
-import { getMyCondominiums } from "../services/condominiums";
+import { useCondominiumContext } from "../context/useCondominiumContext";
 import {
   getCommunications,
   getCommunicationDetail,
@@ -41,21 +40,56 @@ function formatDate(value) {
 
 export default function Communications() {
   const { request } = useAuth();
-  const [searchParams] = useSearchParams();
+  const [searchParams, setSearchParams] = useSearchParams();
   const requestedCondominiumId = searchParams.get("condominioId");
 
-  const [condominiums, setCondominiums] = useState([]);
-  const [selectedId, setSelectedId] = useState("");
+  const {
+    condominiums,
+    condominiumsLoading: loadingCondominiums,
+    condominiumsError: error,
+    selectedCondominiumId,
+    selectCondominium,
+  } = useCondominiumContext();
+
   const [communications, setCommunications] = useState([]);
 
-  const [loadingCondominiums, setLoadingCondominiums] =
-    useState(true);
+  const [refreshKey, setRefreshKey] = useState(0);
+
+  const requestedCondominium = condominiums.find(
+    (condo) =>
+      String(condo.id) === requestedCondominiumId
+  );
+
+  const selectedId = requestedCondominium
+    ? String(requestedCondominium.id)
+    : selectedCondominiumId;
+
+  useEffect(() => {
+  if (!requestedCondominiumId) return;
+
+  const authorized = condominiums.some(
+      (condo) =>
+        String(condo.id) === requestedCondominiumId
+    );
+
+    if (
+      authorized &&
+      String(selectedCondominiumId) !== requestedCondominiumId
+    ) {
+      selectCondominium(requestedCondominiumId);
+    }
+  }, [
+    condominiums,
+    requestedCondominiumId,
+    selectedCondominiumId,
+    selectCondominium,
+  ]);
+
   const [loadingCommunications, setLoadingCommunications] =
     useState(false);
   const [publishing, setPublishing] = useState(false);
   const [loadingDetail, setLoadingDetail] = useState(false);
 
-  const [error, setError] = useState("");
   const [listError, setListError] = useState("");
   const [formError, setFormError] = useState("");
   const [detailError, setDetailError] = useState("");
@@ -64,6 +98,11 @@ export default function Communications() {
   const [title, setTitle] = useState("");
   const [content, setContent] = useState("");
   const [detail, setDetail] = useState(null);
+  const detailRequestRef = useRef(0);
+  const selectedIdRef = useRef(selectedId);
+  useEffect(() => {
+    selectedIdRef.current = selectedId;
+  }, [selectedId]);
 
   const selectedCondominium = condominiums.find(
     (condo) => String(condo.id) === String(selectedId)
@@ -71,48 +110,6 @@ export default function Communications() {
 
   const canPublish =
     selectedCondominium?.puede_publicar === true;
-
-  // Cargar únicamente condominios autorizados.
-  useEffect(() => {
-    let active = true;
-
-    async function loadCondominiums() {
-      try {
-        const result = await getMyCondominiums(request);
-
-        if (!active) return;
-
-        setCondominiums(result);
-        const authorizedCondominium = result.find(
-          (condo) =>
-            String(condo.id) === requestedCondominiumId
-        );
-
-        setSelectedId(
-          result.length > 0
-            ? String(authorizedCondominium?.id ?? result[0].id)
-            : ""
-        );
-      } catch (err) {
-        if (active) {
-          setError(
-            err.message ||
-              "No fue posible cargar tus condominios."
-          );
-        }
-      } finally {
-        if (active) {
-          setLoadingCondominiums(false);
-        }
-      }
-    }
-
-    loadCondominiums();
-
-    return () => {
-      active = false;
-    };
-  }, [request, requestedCondominiumId]);
 
   // Actualizar comunicados al cambiar de condominio.
   useEffect(() => {
@@ -155,39 +152,31 @@ export default function Communications() {
     return () => {
       active = false;
     };
-  }, [request, selectedId]);
+  }, [request, selectedId, refreshKey]);
 
   function handleCondominiumChange(event) {
-    setSelectedId(event.target.value);
+    const nextId = event.target.value;
+
+    if (!selectCondominium(nextId)) return;
+
+    selectedIdRef.current = nextId;
+    detailRequestRef.current += 1;
+
+    setSearchParams({ condominioId: nextId });
     setSuccess("");
     setFormError("");
     setDetailError("");
     setDetail(null);
+    setLoadingDetail(false);
     setTitle("");
     setContent("");
   }
 
-  async function handleRefresh() {
+  function handleRefresh() {
     if (!selectedId || loadingCommunications) return;
 
-    setLoadingCommunications(true);
-    setListError("");
     setSuccess("");
-
-    try {
-      const result = await getCommunications(
-        request,
-        selectedId
-      );
-
-      setCommunications(result);
-    } catch (err) {
-      setListError(
-        err.message || "No se pudieron actualizar los avisos."
-      );
-    } finally {
-      setLoadingCommunications(false);
-    }
+    setRefreshKey((current) => current + 1);
   }
 
   async function handlePublish(event) {
@@ -208,29 +197,35 @@ export default function Communications() {
         contenido: content,
       });
 
-      setTitle("");
-      setContent("");
-      setSuccess("Comunicado publicado correctamente.");
+      if (String(targetCondominium) === String(selectedIdRef.current)) {
+        setTitle("");
+        setContent("");
+        setSuccess("Comunicado publicado correctamente.");
+      }
 
       const updated = await getCommunications(
         request,
         targetCondominium
       );
 
-      if (String(targetCondominium) === String(selectedId)) {
+      if (String(targetCondominium) === String(selectedIdRef.current)) {
         setCommunications(updated);
         setListError("");
       }
     } catch (err) {
-      setFormError(
-        err.message || "No se pudo publicar el comunicado."
-      );
+      if (String(targetCondominium) === String(selectedIdRef.current)) {
+        setFormError(
+          err.message || "No se pudo publicar el comunicado."
+        );
+      }
     } finally {
       setPublishing(false);
     }
   }
 
   async function handleOpenDetail(communicationId) {
+    const requestId = ++detailRequestRef.current;
+
     setDetail(null);
     setDetailError("");
     setLoadingDetail(true);
@@ -241,14 +236,19 @@ export default function Communications() {
         communicationId
       );
 
+      if (requestId !== detailRequestRef.current) return;
+
       setDetail(result);
     } catch (err) {
+      if (requestId !== detailRequestRef.current) return;
+
       setDetailError(
-        err.message ||
-          "No fue posible consultar el detalle."
+        err.message || "No fue posible consultar el detalle."
       );
     } finally {
-      setLoadingDetail(false);
+      if (requestId === detailRequestRef.current) {
+        setLoadingDetail(false);
+      }
     }
   }
 
@@ -538,6 +538,7 @@ export default function Communications() {
                     className="communications-icon-button"
                     aria-label="Cerrar detalle"
                     onClick={() => {
+                      detailRequestRef.current += 1;
                       setDetail(null);
                       setDetailError("");
                       setLoadingDetail(false);
@@ -546,7 +547,6 @@ export default function Communications() {
                     <X size={19} />
                   </button>
                 </div>
-
                 {loadingDetail ? (
                   <p className="communications-muted">
                     Cargando detalle...

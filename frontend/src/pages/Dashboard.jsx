@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import {
   AlertCircle,
@@ -24,7 +24,7 @@ import {
 } from "lucide-react";
 
 import { useAuth } from "../context/useAuth";
-import { getMyCondominiums } from "../services/condominiums";
+import { useCondominiumContext } from "../context/useCondominiumContext";
 import "./Dashboard.css";
 import ContextSelector from "../components/ContextSelector";
 
@@ -43,23 +43,17 @@ const modules = [
 
 export default function Dashboard() {
   const navigate = useNavigate();
-  const { user, request, logout } = useAuth();
-  const [condominiums, setCondominiums] = useState([]);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState("");
+  const { user, logout } = useAuth();
   const [menuOpen, setMenuOpen] = useState(false);
-  // Contexto comunicado por ContextSelector.
-  const [navigationContext, setNavigationContext] = useState({
-    condominioId: "",
-    contexto: null,
-  });
 
-  const handleContextChange = useCallback((value) => {
-    setNavigationContext(value);
-  }, []);
-
-  const selectedCondominiumId = navigationContext.condominioId;
-  const activeContext = navigationContext.contexto;
+  const {
+    condominiums,
+    condominiumsLoading: loading,
+    condominiumsError: error,
+    refreshCondominiums,
+    selectedCondominiumId,
+    context: activeContext,
+  } = useCondominiumContext();
 
   const canSeeReservations =
     activeContext?.rolCondominio === "administrador" ||
@@ -73,39 +67,8 @@ export default function Dashboard() {
     ? `/reservations?condominioId=${encodeURIComponent(selectedCondominiumId)}`
     : "/reservations";
 
-  useEffect(() => {
-    let active = true;
-
-    async function fetchCondominiums() {
-      try {
-        const data = await getMyCondominiums(request);
-        if (active) {
-          setCondominiums(data);
-          setError("");
-        }
-      } catch (err) {
-        if (active) setError(err.message || "No se pudieron cargar los condominios.");
-      } finally {
-        if (active) setLoading(false);
-      }
-    }
-
-    fetchCondominiums();
-    return () => {
-      active = false;
-    };
-  }, [request]);
-
-  async function handleRefresh() {
-    setLoading(true);
-    setError("");
-    try {
-      setCondominiums(await getMyCondominiums(request));
-    } catch (err) {
-      setError(err.message || "No se pudieron cargar los condominios.");
-    } finally {
-      setLoading(false);
-    }
+  function handleRefresh() {
+    refreshCondominiums();
   }
 
   async function handleLogout() {
@@ -324,11 +287,7 @@ export default function Dashboard() {
           </div>
 
           {/* SELECTOR CLIENTE → CONDOMINIO */}
-          <ContextSelector
-            condominiums={condominiums}
-            loading={loading}
-            onContextChange={handleContextChange}
-          />
+          <ContextSelector />
 
           {/* TARJETAS DE RESUMEN */}
           <section
