@@ -1,4 +1,3 @@
-
 import { useCallback, useEffect, useState } from "react";
 import { Link, useSearchParams } from "react-router-dom";
 import {
@@ -13,7 +12,7 @@ import {
 } from "lucide-react";
 
 import { useAuth } from "../context/useAuth";
-import { getMyCondominiums } from "../services/condominiums";
+import { useCondominiumContext } from "../context/useCondominiumContext";
 import { getMyUnits } from "../services/units";
 import {
   getAreas,
@@ -84,9 +83,13 @@ function ReservationsWorkspace({
   request,
   condominium,
   units,
+  condominiumContext,
 }) {
   const condoId = String(condominium.id);
-  const isAdmin = condominium.puede_publicar === true;
+
+  const isAdmin =
+    String(condominiumContext?.condominioId) === condoId &&
+    condominiumContext?.rolCondominio === "administrador";
 
   const availableUnits = units.filter(
     (unit) => String(unit.condominio_id) === condoId
@@ -653,60 +656,82 @@ function ReservationsWorkspace({
 
 export default function Reservations() {
   const { request } = useAuth();
-  const [searchParams] = useSearchParams();
+  const [searchParams, setSearchParams] = useSearchParams();
   const requestedCondominiumId = searchParams.get("condominioId");
 
-  const [condominiums, setCondominiums] = useState([]);
+  const {
+    condominiums,
+    condominiumsLoading,
+    condominiumsError,
+    selectedCondominiumId,
+    selectCondominium,
+    context: condominiumContext,
+  } = useCondominiumContext();
+
   const [units, setUnits] = useState([]);
-  const [selectedId, setSelectedId] = useState("");
+  const [unitsLoading, setUnitsLoading] = useState(true);
+  const [unitsError, setUnitsError] = useState("");
 
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState("");
+  const selectedId = selectedCondominiumId;
+  const loading = condominiumsLoading || unitsLoading;
+  const error = condominiumsError || unitsError;
 
+  // Cargar unidades autorizadas.
   useEffect(() => {
     let active = true;
 
-    async function initialize() {
+    async function loadUnits() {
       try {
-        const condoData = await getMyCondominiums(request);
+        const data = await getMyUnits(request);
 
-        // Si la consulta de unidades falla, no inventamos
-        // unidades ni ofrecemos reservas sin verificar.
-        const unitData = await getMyUnits(request);
-
-        if (!active) return;
-
-        setCondominiums(condoData);
-        setUnits(unitData);
-
-        if (condoData.length) {
-          const authorizedCondominium = condoData.find(
-            (condo) =>
-              String(condo.id) === requestedCondominiumId
-          );
-
-          setSelectedId(
-            String(authorizedCondominium?.id ?? condoData[0].id)
-          );
+        if (active) {
+          setUnits(data);
+          setUnitsError("");
         }
       } catch (err) {
         if (active) {
-          setError(
-            err.message ||
-              "No fue posible cargar tus datos."
+          setUnitsError(
+            err.message || "No fue posible cargar tus unidades."
           );
         }
       } finally {
-        if (active) setLoading(false);
+        if (active) {
+          setUnitsLoading(false);
+        }
       }
     }
 
-    initialize();
+    loadUnits();
 
     return () => {
       active = false;
     };
-  }, [request, requestedCondominiumId]);
+  }, [request]);
+
+  // Respetar el condominio indicado en la URL si está autorizado.
+  useEffect(() => {
+    if (!requestedCondominiumId || condominiumsLoading) {
+      return;
+    }
+
+    const authorized = condominiums.some(
+      (condo) =>
+        String(condo.id) === requestedCondominiumId
+    );
+
+    if (
+      authorized &&
+      selectedCondominiumId !== requestedCondominiumId
+    ) {
+      selectCondominium(requestedCondominiumId);
+    }
+  }, [
+    requestedCondominiumId,
+    condominiumsLoading,
+    condominiums,
+    selectedCondominiumId,
+    selectCondominium,
+  ]);
 
   const selectedCondominium = condominiums.find(
     (condo) => String(condo.id) === String(selectedId)
@@ -769,9 +794,13 @@ export default function Reservations() {
               className="reservations-condo-select"
               aria-label="Seleccionar condominio"
               value={selectedId}
-              onChange={(event) =>
-                setSelectedId(event.target.value)
-              }
+              onChange={(event) => {
+                const nextId = event.target.value;
+
+                if (!selectCondominium(nextId)) return;
+
+                setSearchParams({ condominioId: nextId });
+              }}
             >
               {condominiums.map((condo) => (
                 <option
@@ -791,6 +820,7 @@ export default function Reservations() {
             request={request}
             condominium={selectedCondominium}
             units={units}
+            condominiumContext={condominiumContext}
           />
         )}
       </div>

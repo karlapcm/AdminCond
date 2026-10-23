@@ -1,4 +1,3 @@
-
 import { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
 import {
@@ -8,15 +7,21 @@ import {
 } from "lucide-react";
 
 import { getMyClients } from "../services/clients";
-import { getCondominiumContext } from "../services/condominiums";
 import { useAuth } from "../context/useAuth";
+import { useCondominiumContext } from "../context/useCondominiumContext";
 
-export default function ContextSelector({
-  condominiums,
-  loading,
-  onContextChange,
-}) {
+export default function ContextSelector() {
   const { request } = useAuth();
+
+  const {
+    condominiums,
+    condominiumsLoading: loading,
+    selectedCondominiumId,
+    selectCondominium,
+    context: currentContext,
+    contextLoading,
+    contextError,
+  } = useCondominiumContext();
 
   // Clientes
   const [clients, setClients] = useState([]);
@@ -25,12 +30,6 @@ export default function ContextSelector({
 
   // Selección del usuario
   const [clientId, setClientId] = useState("");
-  const [condominiumId, setCondominiumId] = useState("");
-
-  // Contexto autorizado
-  const [context, setContext] = useState(null);
-  const [contextLoading, setContextLoading] = useState(false);
-  const [contextError, setContextError] = useState("");
 
   // 1. Cargar clientes autorizados
   useEffect(() => {
@@ -64,90 +63,23 @@ export default function ContextSelector({
     };
   }, [request]);
 
-  // 2. Determinar cliente seleccionado
+  const selectedCondominium = condominiums.find(
+    (condo) => String(condo.id) === selectedCondominiumId
+  );
+
   const selectedClientId = clients.some(
     (client) => String(client.id) === clientId
   )
     ? clientId
-    : String(clients[0]?.id ?? "");
+    : String(selectedCondominium?.cliente_id ?? clients[0]?.id ?? "");
 
   const selectedClient = clients.find(
     (client) => String(client.id) === selectedClientId
   );
 
-  // 3. Filtrar condominios del cliente seleccionado
   const availableCondominiums = condominiums.filter(
     (condo) => String(condo.cliente_id) === selectedClientId
   );
-
-  const selectedCondominiumId = availableCondominiums.some(
-    (condo) => String(condo.id) === condominiumId
-  )
-    ? condominiumId
-    : String(availableCondominiums[0]?.id ?? "");
-
-  const selectedCondominium = availableCondominiums.find(
-    (condo) => String(condo.id) === selectedCondominiumId
-  );
-
-  // 4. Consultar contexto autorizado del condominio
-  useEffect(() => {
-    let active = true;
-
-    async function loadContext() {
-      setContext(null);
-      setContextError("");
-
-      if (!selectedCondominiumId) {
-        setContextLoading(false);
-        return;
-      }
-
-      setContextLoading(true);
-
-      try {
-        const data = await getCondominiumContext(
-          request,
-          selectedCondominiumId
-        );
-
-        if (active) {
-          setContext(data);
-        }
-      } catch (error) {
-        if (active) {
-          setContextError(
-            error.message || "No se pudo cargar el contexto."
-          );
-        }
-      } finally {
-        if (active) {
-          setContextLoading(false);
-        }
-      }
-    }
-
-    loadContext();
-
-    return () => {
-      active = false;
-    };
-  }, [request, selectedCondominiumId]);
-
-  // 5. Evitar mostrar un contexto de otro condominio
-  const currentContext =
-    context &&
-    String(context.condominioId) === selectedCondominiumId
-      ? context
-      : null;
-      // Compartir el contexto seleccionado con el Dashboard.
-      // No se realiza otra petición HTTP.
-      useEffect(() => {
-      onContextChange?.({
-          condominioId: selectedCondominiumId,
-          contexto: currentContext,
-      });
-      }, [onContextChange, selectedCondominiumId, currentContext]);
 
   // 6. Condiciones orientativas para los accesos visuales
   const isAdministrator =
@@ -196,8 +128,16 @@ export default function ContextSelector({
               clientsLoading || clients.length === 0
             }
             onChange={(event) => {
-              setClientId(event.target.value);
-              setCondominiumId("");
+              const nextClientId = event.target.value;
+              setClientId(nextClientId);
+
+              const firstCondominium = condominiums.find(
+                (condo) => String(condo.cliente_id) === nextClientId
+              );
+
+              if (firstCondominium) {
+                selectCondominium(firstCondominium.id);
+              }
             }}
           >
             {clients.length === 0 && (
@@ -228,7 +168,7 @@ export default function ContextSelector({
               loading || availableCondominiums.length === 0
             }
             onChange={(event) => {
-              setCondominiumId(event.target.value);
+              selectCondominium(event.target.value);
             }}
           >
             {availableCondominiums.length === 0 && (

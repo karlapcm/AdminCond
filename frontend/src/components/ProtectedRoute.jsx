@@ -1,6 +1,8 @@
 
 import { Navigate, Outlet } from "react-router-dom";
+
 import { useAuth } from "../context/useAuth";
+import { CondominiumProvider } from "../context/CondominiumContext";
 
 export default function ProtectedRoute() {
   const { isAuthenticated } = useAuth();
@@ -9,5 +11,9 @@ export default function ProtectedRoute() {
     return <Navigate to="/login" replace />;
   }
 
-  return <Outlet />;
+  return (
+    <CondominiumProvider>
+      <Outlet />
+    </CondominiumProvider>
+  );
 }
