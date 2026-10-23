@@ -1,7 +1,7 @@
 
 import test, { before, after } from "node:test";
 import assert from "node:assert/strict";
-import { randomUUID } from "node:crypto";
+import { randomUUID, randomBytes, createHash,} from "node:crypto";
 import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
@@ -82,6 +82,67 @@ async function send(path, role, options = {}) {
       ...options.headers,
     },
   });
+}
+
+function createTestInvitation({ expired = false } = {}) {
+  const token = randomBytes(32).toString("base64url");
+
+  const tokenHash = createHash("sha256")
+    .update(token)
+    .digest("hex");
+
+  const createdAt = expired
+    ? "NOW() - INTERVAL '72 hours'"
+    : "NOW()";
+
+  const expiresAt = expired
+    ? "NOW() - INTERVAL '24 hours'"
+    : "NOW() + INTERVAL '48 hours'";
+
+  const invitationId = sql(`
+    WITH solicitud AS (
+      INSERT INTO admincond.solicitudes_residentes (
+        unidad_id,
+        condominio_id,
+        solicitado_por,
+        correo_invitado,
+        estado,
+        revisado_por,
+        revisada_en
+      )
+      SELECT
+        u.id,
+        u.condominio_id,
+        ${ids.resident},
+        '${emails.owner}',
+        'aprobada',
+        ${ids.admin},
+        NOW()
+      FROM admincond.unidades u
+      WHERE u.codigo = 'UNIT-A-${marker}'
+        AND u.condominio_id = ${ids.condo}
+      RETURNING id
+    )
+    INSERT INTO admincond.invitaciones (
+      solicitud_id,
+      token_hash,
+      correo_destino,
+      creada_en,
+      expira_en
+    )
+    SELECT
+      id,
+      '${tokenHash}',
+      '${emails.owner}',
+      ${createdAt},
+      ${expiresAt}
+    FROM solicitud
+    RETURNING id;
+  `);
+
+  assert.match(invitationId, /^\d+$/);
+
+  return token;
 }
 
 before(async () => {
@@ -269,6 +330,22 @@ after(() => {
       DELETE FROM admincond.areas_comunes
       WHERE condominio_id IN (
         SELECT id FROM admincond.condominios
+        WHERE nombre LIKE '%${marker}'
+      );
+
+      DELETE FROM admincond.invitaciones
+      WHERE solicitud_id IN (
+        SELECT s.id
+        FROM admincond.solicitudes_residentes s
+        JOIN admincond.condominios c
+          ON c.id = s.condominio_id
+        WHERE c.nombre LIKE '%${marker}'
+      );
+
+      DELETE FROM admincond.solicitudes_residentes
+      WHERE condominio_id IN (
+        SELECT id
+        FROM admincond.condominios
         WHERE nombre LIKE '%${marker}'
       );
 
@@ -493,4 +570,149 @@ test("D26-05: residente consulta solamente sus unidades", async () => {
   assert.equal(body.unidades.length, 1);
   assert.equal(body.unidades[0].codigo, `UNIT-A-${marker}`);
   assert.equal(body.unidades[0].es_ocupante, true);
+});
+
+test("D27-01: residente no principal no puede solicitar residentes", async () => {
+  const unitsResponse = await send(
+    `/api/units/condominium/${ids.condo}`,
+    "admin"
+  );
+
+  assert.equal(unitsResponse.status, 200);
+
+  const { unidades } = await unitsResponse.json();
+
+  const unitId = unidades.find(
+    (unit) => unit.codigo === `UNIT-A-${marker}`
+  )?.id;
+
+  assert.ok(unitId);
+
+  const response = await send(
+    "/api/invitations/request",
+    "resident",
+    {
+      method: "POST",
+      body: JSON.stringify({
+        unidadId: Number(unitId),
+        correo: emails.owner,
+      }),
+    }
+  );
+
+  assert.equal(response.status, 404);
+});
+
+test("D27-02: residente no puede consultar solicitudes administrativas", async () => {
+  const response = await send(
+    "/api/invitations/pending",
+    "resident"
+  );
+
+  const body = await response.json();
+
+  assert.equal(response.status, 200, JSON.stringify(body));
+  assert.deepEqual(body.solicitudes, []);
+});
+
+test("D27-03: invitación con token inválido es rechazada", async () => {
+  const response = await send(
+    "/api/invitations/accept",
+    "resident",
+    {
+      method: "POST",
+      body: JSON.stringify({
+        token: "token-invalido-de-prueba-123456789",
+      }),
+    }
+  );
+
+  assert.equal(response.status, 400);
+});
+
+test("D27-04: usuario externo no puede solicitar residentes en otro cliente", async () => {
+  const unitsResponse = await send(
+    `/api/units/condominium/${ids.condo}`,
+    "admin"
+  );
+
+  assert.equal(unitsResponse.status, 200);
+
+  const { unidades } = await unitsResponse.json();
+
+  const unitId = unidades.find(
+    (unit) => unit.codigo === `UNIT-A-${marker}`
+  )?.id;
+
+  assert.ok(unitId);
+
+  const response = await send(
+    "/api/invitations/request",
+    "outsider",
+    {
+      method: "POST",
+      body: JSON.stringify({
+        unidadId: Number(unitId),
+        correo: emails.owner,
+      }),
+    }
+  );
+
+  assert.equal(response.status, 404);
+});
+
+test("D27-05: solo el destinatario puede aceptar y no reutilizar el token", async () => {
+  const token = createTestInvitation();
+
+  const options = {
+    method: "POST",
+    body: JSON.stringify({ token }),
+  };
+
+  // Una cuenta diferente intenta utilizar la invitación.
+  const incorrectUser = await send(
+    "/api/invitations/accept",
+    "resident",
+    options
+  );
+
+  assert.equal(incorrectUser.status, 403);
+
+  // El verdadero destinatario acepta la invitación.
+  const correctUser = await send(
+    "/api/invitations/accept",
+    "owner",
+    options
+  );
+
+  const body = await correctUser.json();
+
+  assert.equal(correctUser.status, 200, JSON.stringify(body));
+  assert.equal(body.message, "Invitación aceptada correctamente");
+
+  // El token utilizado ya no debe funcionar.
+  const reused = await send(
+    "/api/invitations/accept",
+    "owner",
+    options
+  );
+
+  assert.equal(reused.status, 400);
+});
+
+test("D27-06: una invitación expirada es rechazada", async () => {
+  const token = createTestInvitation({
+    expired: true,
+  });
+
+  const response = await send(
+    "/api/invitations/accept",
+    "owner",
+    {
+      method: "POST",
+      body: JSON.stringify({ token }),
+    }
+  );
+
+  assert.equal(response.status, 400);
 });
