@@ -22,6 +22,10 @@ export default function CondominiumDetail() {
   const [condominium, setCondominium] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
+  const [loadedCondominiumId, setLoadedCondominiumId] = useState(null);
+
+  const isCurrentDetail =
+    loadedCondominiumId === condominioId;
 
   useEffect(() => {
     let active = true;
@@ -35,9 +39,13 @@ export default function CondominiumDetail() {
 
         if (active) {
           setCondominium(result);
+          setError("");
+          setLoadedCondominiumId(condominioId);
         }
       } catch (err) {
         if (active) {
+          setCondominium(null);
+          setLoadedCondominiumId(condominioId);
           setError(
             err.status === 404 || err.status === 403
               ? "No se encontró el condominio o no tienes acceso."
@@ -89,7 +97,7 @@ export default function CondominiumDetail() {
       </header>
 
       <main className="detail-content">
-        {loading ? (
+        {(loading || !isCurrentDetail) ? (
           <div className="data-state" role="status">
             <LoaderCircle className="spin" size={28} />
             <h2>Cargando condominio...</h2>
