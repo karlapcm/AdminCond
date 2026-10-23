@@ -48,11 +48,16 @@ function UnitPeople({ unitId, request }) {
   const [people, setPeople] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
+  const [reloadKey, setReloadKey] = useState(0);
 
   useEffect(() => {
     let active = true;
 
     async function loadPeople() {
+      setLoading(true);
+      setError("");
+      setPeople([]);
+
       try {
         const result = await getUnitPeople(request, unitId);
 
@@ -79,7 +84,7 @@ function UnitPeople({ unitId, request }) {
     return () => {
       active = false;
     };
-  }, [request, unitId]);
+  }, [request, unitId, reloadKey]);
 
   if (loading) {
     return (
@@ -95,6 +100,15 @@ function UnitPeople({ unitId, request }) {
       <div className="unit-people-error" role="alert">
         <AlertCircle size={17} />
         <span>{error}</span>
+
+        <button
+          type="button"
+          className="refresh-button"
+          onClick={() => setReloadKey((current) => current + 1)}
+        >
+          <RefreshCw size={16} />
+          Reintentar
+        </button>
       </div>
     );
   }
