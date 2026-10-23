@@ -63,7 +63,7 @@ export default function ContextSelector() {
     };
   }, [request]);
 
-  const selectedCondominium = condominiums.find(
+  const globalSelectedCondominium = condominiums.find(
     (condo) => String(condo.id) === selectedCondominiumId
   );
 
@@ -71,7 +71,11 @@ export default function ContextSelector() {
     (client) => String(client.id) === clientId
   )
     ? clientId
-    : String(selectedCondominium?.cliente_id ?? clients[0]?.id ?? "");
+    : String(
+        globalSelectedCondominium?.cliente_id ??
+          clients[0]?.id ??
+          ""
+      );
 
   const selectedClient = clients.find(
     (client) => String(client.id) === selectedClientId
@@ -80,6 +84,11 @@ export default function ContextSelector() {
   const availableCondominiums = condominiums.filter(
     (condo) => String(condo.cliente_id) === selectedClientId
   );
+
+  const selectedCondominium =
+    availableCondominiums.find(
+      (condo) => String(condo.id) === selectedCondominiumId
+    ) ?? null;
 
   // 6. Condiciones orientativas para los accesos visuales
   const isAdministrator =
@@ -163,7 +172,7 @@ export default function ContextSelector() {
           <span>Condominio</span>
 
           <select
-            value={selectedCondominiumId}
+            value={selectedCondominium?.id ?? ""}
             disabled={
               loading || availableCondominiums.length === 0
             }
