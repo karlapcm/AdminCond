@@ -1,6 +1,7 @@
 
 import {
   useCallback,
+  useEffect,
   useRef,
   useState,
 } from "react";
@@ -10,44 +11,26 @@ import { apiRequest } from "../services/api";
 
 export function AuthProvider({ children }) {
   const [user, setUser] = useState(null);
+  const [initializing, setInitializing] = useState(true);
 
-  // Los tokens permanecen solamente en memoria.
-  const tokensRef = useRef({
-    accessToken: null,
-    refreshToken: null,
-  });
+  // Solo el access token permanece en memoria.
+  // El refresh token está en una cookie HttpOnly.
+  const accessTokenRef = useRef(null);
 
-  // Evita renovar dos veces simultáneamente el mismo refresh token.
+  // Evita renovaciones simultáneas.
   const renewalRef = useRef(null);
 
+  // Evita restaurar dos veces en React StrictMode.
+  const restorationStartedRef = useRef(false);
+
+  // Impide que una restauración antigua sobrescriba
+  // un login o logout más reciente.
+  const sessionVersionRef = useRef(0);
+
   const clearSession = useCallback(() => {
-    tokensRef.current = {
-      accessToken: null,
-      refreshToken: null,
-    };
+    sessionVersionRef.current += 1;
+    accessTokenRef.current = null;
     setUser(null);
-  }, []);
-
-  const login = useCallback(async (correo, password) => {
-    const data = await apiRequest("/api/auth/login", {
-      method: "POST",
-      body: { correo, password },
-    });
-
-    if (
-      !data?.accessToken ||
-      !data?.refreshToken ||
-      !data?.user
-    ) {
-      throw new Error("La respuesta de autenticación es incompleta.");
-    }
-
-    tokensRef.current = {
-      accessToken: data.accessToken,
-      refreshToken: data.refreshToken,
-    };
-
-    setUser(data.user);
   }, []);
 
   const renewSession = useCallback(async () => {
@@ -55,26 +38,16 @@ export function AuthProvider({ children }) {
       return renewalRef.current;
     }
 
-    const currentRefreshToken = tokensRef.current.refreshToken;
-
-    if (!currentRefreshToken) {
-      throw new Error("La sesión ha terminado.");
-    }
-
     const renewal = (async () => {
+      // La cookie HttpOnly se envía automáticamente.
+      // No necesitamos leer ni enviar refreshToken.
       const data = await apiRequest("/api/auth/refresh", {
         method: "POST",
-        body: { refreshToken: currentRefreshToken },
       });
 
-      if (!data?.accessToken || !data?.refreshToken) {
+      if (!data?.accessToken) {
         throw new Error("No se pudo renovar la sesión.");
       }
-
-      tokensRef.current = {
-        accessToken: data.accessToken,
-        refreshToken: data.refreshToken,
-      };
 
       return data.accessToken;
     })();
@@ -90,9 +63,67 @@ export function AuthProvider({ children }) {
     }
   }, []);
 
+  // Restaurar la sesión cuando se carga la aplicación.
+  useEffect(() => {
+    if (restorationStartedRef.current) {
+      return;
+    }
+
+    restorationStartedRef.current = true;
+
+    const currentVersion = sessionVersionRef.current;
+
+    async function restoreSession() {
+      try {
+        const token = await renewSession();
+
+        const data = await apiRequest("/api/auth/me", {
+          token,
+        });
+
+        if (sessionVersionRef.current !== currentVersion) {
+          return;
+        }
+
+        if (!data?.user) {
+          throw new Error("No se pudo recuperar el usuario.");
+        }
+
+        accessTokenRef.current = token;
+        setUser(data.user);
+      } catch {
+        if (sessionVersionRef.current === currentVersion) {
+          accessTokenRef.current = null;
+          setUser(null);
+        }
+      } finally {
+        setInitializing(false);
+      }
+    }
+
+    restoreSession();
+  }, [renewSession]);
+
+  const login = useCallback(async (correo, password) => {
+    const data = await apiRequest("/api/auth/login", {
+      method: "POST",
+      body: { correo, password },
+    });
+
+    if (!data?.accessToken || !data?.user) {
+      throw new Error(
+        "La respuesta de autenticación es incompleta."
+      );
+    }
+
+    sessionVersionRef.current += 1;
+    accessTokenRef.current = data.accessToken;
+    setUser(data.user);
+  }, []);
+
   const request = useCallback(
     async (path, options = {}) => {
-      const firstToken = tokensRef.current.accessToken;
+      const firstToken = accessTokenRef.current;
 
       if (!firstToken) {
         throw new Error("Debes iniciar sesión.");
@@ -109,12 +140,14 @@ export function AuthProvider({ children }) {
         }
 
         try {
-          // Otra solicitud podría haber renovado ya el token.
-          const latestToken = tokensRef.current.accessToken;
+          const latestToken = accessTokenRef.current;
+
           const newToken =
             latestToken !== firstToken
               ? latestToken
               : await renewSession();
+
+          accessTokenRef.current = newToken;
 
           return await apiRequest(path, {
             ...options,
@@ -124,6 +157,7 @@ export function AuthProvider({ children }) {
           if (retryError.status === 401) {
             clearSession();
           }
+
           throw retryError;
         }
       }
@@ -132,23 +166,39 @@ export function AuthProvider({ children }) {
   );
 
   const logout = useCallback(async () => {
-    const refreshToken = tokensRef.current.refreshToken;
-
     clearSession();
 
-    if (refreshToken) {
-      try {
-        await apiRequest("/api/auth/logout", {
-          method: "POST",
-          body: { refreshToken },
-        });
-      } catch (error) {
-        // Si falla el servidor, se borra igualmente la sesión local.
-        // La revocación remota deberá comprobarse posteriormente.
-        console.error("No se pudo revocar la sesión:", error.message);
-      }
+    try {
+      // El backend revoca el refresh token de la cookie
+      // y ordena eliminarla del navegador.
+      await apiRequest("/api/auth/logout", {
+        method: "POST",
+      });
+    } catch (error) {
+      console.error(
+        "No se pudo revocar la sesión:",
+        error.message
+      );
     }
   }, [clearSession]);
+
+  // Evita que ProtectedRoute redirija al login
+  // antes de terminar la restauración.
+  if (initializing) {
+    return (
+      <div
+        role="status"
+        aria-live="polite"
+        style={{
+          minHeight: "100vh",
+          display: "grid",
+          placeItems: "center",
+        }}
+      >
+        Verificando sesión de AdminCond...
+      </div>
+    );
+  }
 
   return (
     <AuthContext.Provider

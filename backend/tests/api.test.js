@@ -172,3 +172,59 @@ test("D20-18: rechaza un esquema de autenticación incorrecto", async () => {
   assert.equal(response.status, 401);
   assert.equal(body.message, "Token requerido");
 });
+
+
+test("D30-01: refresh rechaza un origen no autorizado", async () => {
+  const response = await fetch(
+    `${baseUrl}/api/auth/refresh`,
+    {
+      method: "POST",
+      headers: {
+        Origin: "https://sitio-no-autorizado.example",
+      },
+    }
+  );
+
+  const body = await response.json();
+
+  assert.equal(response.status, 403);
+  assert.equal(body.message, "Origen no autorizado");
+});
+
+test("D30-02: logout rechaza solicitudes sin Origin", async () => {
+  const response = await fetch(
+    `${baseUrl}/api/auth/logout`,
+    {
+      method: "POST",
+    }
+  );
+
+  const body = await response.json();
+
+  assert.equal(response.status, 403);
+  assert.equal(body.message, "Origen no autorizado");
+});
+
+test("D30-03: refresh no acepta tokens enviados solo en JSON", async () => {
+  const response = await fetch(
+    `${baseUrl}/api/auth/refresh`,
+    {
+      method: "POST",
+      headers: {
+        Origin: "http://localhost:5173",
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        refreshToken: "token-falso-en-el-cuerpo-de-la-solicitud",
+      }),
+    }
+  );
+
+  const body = await response.json();
+
+  assert.equal(response.status, 401);
+  assert.equal(
+    body.message,
+    "Sesión inválida o expirada"
+  );
+});
