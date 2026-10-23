@@ -16,9 +16,15 @@ export const invitationRouter = Router();
 
 invitationRouter.use(requireAuth);
 
+// El límite ampliado solo se aplica a la API aislada
+// de pruebas automatizadas, nunca a producción.
+const isAutomatedTest =
+  process.env.NODE_ENV === "test" &&
+  process.env.DB_NAME === "admincond_test";
+
 const limiter = rateLimit({
   windowMs: 15 * 60 * 1000,
-  limit: 20,
+  limit: isAutomatedTest ? 1000 : 20,
   standardHeaders: "draft-8",
   legacyHeaders: false,
 });

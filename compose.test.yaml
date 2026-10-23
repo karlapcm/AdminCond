@@ -35,6 +35,7 @@ services:
       - ./backend/.env.test
 
     environment:
+      NODE_ENV: test
       HOST: 0.0.0.0
       PORT: 3000
       DB_HOST: postgres-test

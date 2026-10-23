@@ -349,6 +349,18 @@ after(() => {
         WHERE nombre LIKE '%${marker}'
       );
 
+      DELETE FROM admincond.cuotas
+      WHERE condominio_id IN (
+        SELECT id FROM admincond.condominios
+        WHERE nombre LIKE '%${marker}'
+      );
+
+      DELETE FROM admincond.permisos_financieros
+      WHERE condominio_id IN (
+        SELECT id FROM admincond.condominios
+        WHERE nombre LIKE '%${marker}'
+      );
+
       DELETE FROM admincond.relaciones_unidad
       WHERE condominio_id IN (
         SELECT id FROM admincond.condominios
@@ -715,4 +727,236 @@ test("D27-06: una invitación expirada es rechazada", async () => {
   );
 
   assert.equal(response.status, 400);
+});
+
+test("D28-01: administrador sin permiso financiero no crea cuotas", async () => {
+  const unitsResponse = await send(
+    `/api/units/condominium/${ids.condo}`,
+    "admin"
+  );
+
+  assert.equal(unitsResponse.status, 200);
+
+  const { unidades } = await unitsResponse.json();
+
+  const unitId = unidades.find(
+    (unit) => unit.codigo === `UNIT-A-${marker}`
+  )?.id;
+
+  assert.ok(unitId);
+
+  const response = await send(
+    "/api/finance/fees",
+    "admin",
+    {
+      method: "POST",
+      body: JSON.stringify({
+        unidadId: Number(unitId),
+        concepto: "Mantenimiento TEST",
+        periodo: "2026-10-01",
+        monto: "150.00",
+        vencimiento: "2026-10-31",
+      }),
+    }
+  );
+
+  assert.equal(response.status, 404);
+});
+
+test("D28-02: usuario externo no puede crear cuotas en otro cliente", async () => {
+  const unitsResponse = await send(
+    `/api/units/condominium/${ids.condo}`,
+    "admin"
+  );
+
+  assert.equal(unitsResponse.status, 200);
+
+  const { unidades } = await unitsResponse.json();
+
+  const unitId = unidades.find(
+    (unit) => unit.codigo === `UNIT-A-${marker}`
+  )?.id;
+
+  assert.ok(unitId);
+
+  const response = await send(
+    "/api/finance/fees",
+    "outsider",
+    {
+      method: "POST",
+      body: JSON.stringify({
+        unidadId: Number(unitId),
+        concepto: "Cuota ajena TEST",
+        periodo: "2026-11-01",
+        monto: "120.00",
+        vencimiento: "2026-11-30",
+      }),
+    }
+  );
+
+  assert.equal(response.status, 404);
+});
+
+
+test("D28-03: permiso financiero activo permite crear y revocado bloquea", async () => {
+  const unitsResponse = await send(
+    `/api/units/condominium/${ids.condo}`,
+    "admin"
+  );
+
+  assert.equal(unitsResponse.status, 200);
+
+  const { unidades } = await unitsResponse.json();
+
+  const unitId = unidades.find(
+    (unit) => unit.codigo === `UNIT-A-${marker}`
+  )?.id;
+
+  const unitBId = unidades.find(
+    (unit) => unit.codigo === `UNIT-B-${marker}`
+  )?.id;
+
+  assert.ok(unitId);
+  assert.ok(unitBId);
+
+  // 1. Otorgar permiso financiero explícito al administrador.
+  sql(`
+    INSERT INTO admincond.permisos_financieros (
+      usuario_id,
+      condominio_id,
+      permiso,
+      otorgado_por
+    )
+    VALUES (
+      ${ids.admin},
+      ${ids.condo},
+      'crear_cuotas',
+      ${ids.admin}
+    );
+  `);
+
+  // 2. Con el permiso activo, puede crear una cuota.
+  const authorized = await send(
+    "/api/finance/fees",
+    "admin",
+    {
+      method: "POST",
+      body: JSON.stringify({
+        unidadId: Number(unitId),
+        concepto: "Mantenimiento autorizado TEST",
+        periodo: "2026-12-01",
+        monto: "150.00",
+        vencimiento: "2026-12-31",
+      }),
+    }
+  );
+
+  const body = await authorized.json();
+
+  assert.equal(authorized.status, 201, JSON.stringify(body));
+  assert.equal(body.cuota.concepto, "Mantenimiento autorizado TEST");
+  assert.equal(Number(body.cuota.monto), 150);
+
+  // 3. El residente de la Unidad A puede consultar su cuota.
+  const residentResponse = await send(
+    "/api/finance/fees/mine",
+    "resident"
+  );
+
+  const residentBody = await residentResponse.json();
+
+  assert.equal(
+    residentResponse.status,
+    200,
+    JSON.stringify(residentBody)
+  );
+
+  assert.ok(
+    residentBody.cuotas.some(
+      (cuota) => String(cuota.id) === String(body.cuota.id)
+    ),
+    "El residente debe visualizar la cuota de su unidad"
+  );
+
+  // 4. Crear una cuota diferente para la Unidad B.
+  const otherFeeResponse = await send(
+    "/api/finance/fees",
+    "admin",
+    {
+      method: "POST",
+      body: JSON.stringify({
+        unidadId: Number(unitBId),
+        concepto: "Cuota Unidad B TEST",
+        periodo: "2026-12-01",
+        monto: "100.00",
+        vencimiento: "2026-12-31",
+      }),
+    }
+  );
+
+  const otherFeeBody = await otherFeeResponse.json();
+
+  assert.equal(
+    otherFeeResponse.status,
+    201,
+    JSON.stringify(otherFeeBody)
+  );
+
+  // 5. El residente de la Unidad A NO debe ver la cuota de B.
+  const isolatedResponse = await send(
+    "/api/finance/fees/mine",
+    "resident"
+  );
+
+  const isolatedBody = await isolatedResponse.json();
+
+  assert.equal(
+    isolatedResponse.status,
+    200,
+    JSON.stringify(isolatedBody)
+  );
+
+  assert.ok(
+    isolatedBody.cuotas.some(
+      (cuota) => String(cuota.id) === String(body.cuota.id)
+    ),
+    "El residente debe seguir viendo su propia cuota"
+  );
+
+  assert.ok(
+    isolatedBody.cuotas.every(
+      (cuota) =>
+        String(cuota.id) !== String(otherFeeBody.cuota.id)
+    ),
+    "El residente no debe ver cuotas de la Unidad B"
+  );
+
+  // 6. Revocar el permiso financiero del administrador.
+  sql(`
+    UPDATE admincond.permisos_financieros
+    SET estado = 'revocado',
+        revocado_por = ${ids.admin},
+        revocado_en = NOW()
+    WHERE usuario_id = ${ids.admin}
+      AND condominio_id = ${ids.condo}
+      AND permiso = 'crear_cuotas';
+  `);
+
+  // 7. Con el permiso revocado, ya no puede crear cuotas.
+  const revoked = await send(
+    "/api/finance/fees",
+    "admin",
+    {
+      method: "POST",
+      body: JSON.stringify({
+        unidadId: Number(unitId),
+        concepto: "Cuota después de revocación TEST",
+        periodo: "2027-01-01",
+        monto: "150.00",
+        vencimiento: "2027-01-31",
+      }),
+    }
+  );
+
+  assert.equal(revoked.status, 404);
 });
