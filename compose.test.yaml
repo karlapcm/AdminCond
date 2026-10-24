@@ -43,6 +43,7 @@ services:
       DB_NAME: admincond_test
       DB_USER: admincond_test_api
       RECEIPTS_DIR: /tmp/admincond-test-receipts
+      ALLOW_DEV_INVITATION_TOKENS: "true"
 
     ports:
       - "127.0.0.1:3001:3000"
@@ -51,6 +52,69 @@ services:
       postgres-test:
         condition: service_healthy
 
+  api-test-no-mail:
+    build:
+      context: ./backend
+
+    env_file:
+      - ./backend/.env.test
+
+    environment:
+      NODE_ENV: test
+      HOST: 0.0.0.0
+      PORT: 3000
+      DB_HOST: postgres-test
+      DB_PORT: 5432
+      DB_NAME: admincond_test
+      DB_USER: admincond_test_api
+      RECEIPTS_DIR: /tmp/admincond-test-no-mail-receipts
+      ALLOW_DEV_INVITATION_TOKENS: "false"
+      SMTP_HOST: ""
+      SMTP_PORT: ""
+      SMTP_USER: ""
+      SMTP_PASS: ""
+      SMTP_FROM: ""
+
+    ports:
+      - "127.0.0.1:3002:3000"
+
+    depends_on:
+      postgres-test:
+        condition: service_healthy
+
+  api-test-mail:
+    build:
+      context: ./backend
+
+    env_file:
+      - ./backend/.env.test
+
+    environment:
+      NODE_ENV: test
+      HOST: 0.0.0.0
+      PORT: 3000
+      DB_HOST: postgres-test
+      DB_PORT: 5432
+      DB_NAME: admincond_test
+      DB_USER: admincond_test_api
+      RECEIPTS_DIR: /tmp/admincond-test-mail-receipts
+
+      ALLOW_DEV_INVITATION_TOKENS: "false"
+      SMTP_TEST_TRANSPORT: "true"
+
+      # Valores ficticios. jsonTransport no conecta a SMTP.
+      SMTP_HOST: "smtp.example.test"
+      SMTP_PORT: "587"
+      SMTP_USER: "usuario-test"
+      SMTP_PASS: "clave-ficticia"
+      SMTP_FROM: "AdminCond <no-reply@example.test>"
+
+    ports:
+      - "127.0.0.1:3003:3000"
+
+    depends_on:
+      postgres-test:
+        condition: service_healthy
 
 volumes:
   admincond_test_pgdata:

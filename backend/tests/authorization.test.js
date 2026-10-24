@@ -1,4 +1,3 @@
-
 import test, { before, after } from "node:test";
 import assert from "node:assert/strict";
 import { randomUUID, randomBytes, createHash,} from "node:crypto";
@@ -7,6 +6,16 @@ import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import dotenv from "dotenv";
 import jwt from "jsonwebtoken";
+import { Client } from "pg";
+
+import {
+  claimInvitationDelivery,
+  recordInvitationDelivery,
+} from "../src/modules/invitations/invitation.delivery.js";
+
+import {
+  reissueFailedInvitation,
+} from "../src/modules/invitations/invitation.reissue.js";
 
 const root = fileURLToPath(new URL("../../", import.meta.url));
 const envPath = fileURLToPath(new URL("../.env.test", import.meta.url));
@@ -30,6 +39,7 @@ const emails = {
   resident: `resident-${marker}@admincond.test`,
   owner: `owner-${marker}@admincond.test`,
   outsider: `outsider-${marker}@admincond.test`,
+  approval: `approval-${marker}@admincond.test`,
 };
 
 const sessions = {
@@ -37,6 +47,7 @@ const sessions = {
   resident: randomUUID(),
   owner: randomUUID(),
   outsider: randomUUID(),
+  approval: randomUUID(),
 };
 
 let ids;
@@ -192,6 +203,16 @@ before(async () => {
       VALUES ('Externo TEST', '${emails.outsider}', 'NO_LOGIN_TEST')
       RETURNING id INTO outsider_id;
 
+      -- Usuario adicional para D31-02.
+      -- No pertenece inicialmente a ninguna unidad.
+      INSERT INTO admincond.usuarios
+        (nombre, correo, password_hash)
+      VALUES (
+        'Invitado Aprobación TEST',
+        '${emails.approval}',
+        'NO_LOGIN_TEST'
+      );
+
       INSERT INTO admincond.clientes (nombre)
       VALUES ('CLIENT-A-${marker}')
       RETURNING id INTO client_a;
@@ -263,6 +284,10 @@ before(async () => {
         ('${sessions.owner}', owner_id,
          '${randomUUID()}', NOW() + INTERVAL '1 hour'),
         ('${sessions.outsider}', outsider_id,
+         '${randomUUID()}', NOW() + INTERVAL '1 hour'),
+        ('${sessions.approval}',
+         (SELECT id FROM admincond.usuarios
+          WHERE correo = '${emails.approval}'),
          '${randomUUID()}', NOW() + INTERVAL '1 hour');
     END
     $$;
@@ -309,6 +334,13 @@ before(async () => {
     resident: signToken(ids.resident, sessions.resident),
     owner: signToken(ids.owner, sessions.owner),
     outsider: signToken(ids.outsider, sessions.outsider),
+    approval: signToken(
+      sql(`
+        SELECT id FROM admincond.usuarios
+        WHERE correo = '${emails.approval}';
+      `),
+      sessions.approval
+    ),
   };
 });
 
@@ -411,7 +443,8 @@ after(() => {
         '${emails.admin}',
         '${emails.resident}',
         '${emails.owner}',
-        '${emails.outsider}'
+        '${emails.outsider}',
+        '${emails.approval}'
       );
     END
     $$;
@@ -1443,4 +1476,1077 @@ test("D29-04: comprobante real permite descarga autorizada y bloquea externos", 
       );
     }
   }
+});
+
+
+test("D31-01: responsable principal solicita invitar a un residente", async () => {
+  // Convertir al residente de la Unidad A en responsable
+  // principal activo dentro de nuestro entorno TEST.
+  const updated = sql(`
+    UPDATE admincond.relaciones_unidad r
+    SET es_principal = TRUE
+    FROM admincond.unidades u
+    WHERE r.unidad_id = u.id
+      AND r.usuario_id = ${ids.resident}
+      AND r.condominio_id = ${ids.condo}
+      AND u.codigo = 'UNIT-A-${marker}'
+      AND u.condominio_id = ${ids.condo}
+      AND r.estado = 'activo'
+    RETURNING r.id;
+  `);
+
+  assert.match(updated, /^\d+$/);
+
+  // Obtener la unidad donde el usuario es responsable principal.
+  const unitsResponse = await send(
+    "/api/units/mine",
+    "resident"
+  );
+
+  const unitsBody = await unitsResponse.json();
+
+  assert.equal(
+    unitsResponse.status,
+    200,
+    JSON.stringify(unitsBody)
+  );
+
+  const unit = unitsBody.unidades.find(
+    (item) => item.codigo === `UNIT-A-${marker}`
+  );
+
+  assert.ok(unit);
+  assert.equal(unit.es_principal, true);
+
+  // Invitamos a una cuenta activa de prueba que todavía
+  // no pertenece a la Unidad A.
+  const response = await send(
+    "/api/invitations/request",
+    "resident",
+    {
+      method: "POST",
+      body: JSON.stringify({
+        unidadId: Number(unit.id),
+        correo: emails.outsider,
+      }),
+    }
+  );
+
+  const body = await response.json();
+
+  assert.equal(response.status, 201, JSON.stringify(body));
+
+  assert.equal(
+    body.solicitud.correo_invitado,
+    emails.outsider
+  );
+
+  assert.equal(body.solicitud.estado, "pendiente");
+
+  // Verificar que la solicitud se guardó realmente.
+  const persistedState = sql(`
+    SELECT estado
+    FROM admincond.solicitudes_residentes
+    WHERE id = ${Number(body.solicitud.id)}
+      AND condominio_id = ${ids.condo};
+  `);
+
+  assert.equal(persistedState, "pendiente");
+});
+
+
+test("D31-02: administrador aprueba solicitud y genera invitación segura", async () => {
+  // Identificamos la unidad A de nuestros fixtures TEST.
+  const unitId = sql(`
+    SELECT id
+    FROM admincond.unidades
+    WHERE codigo = 'UNIT-A-${marker}'
+      AND condominio_id = ${ids.condo};
+  `);
+
+  assert.match(unitId, /^\d+$/);
+
+  // Garantizar el permiso necesario para solicitar.
+  sql(`
+    UPDATE admincond.relaciones_unidad
+    SET es_principal = TRUE
+    WHERE usuario_id = ${ids.resident}
+      AND unidad_id = ${unitId}
+      AND estado = 'activo';
+  `);
+
+  // 1. El responsable principal genera la solicitud.
+  const requestResponse = await send(
+    "/api/invitations/request",
+    "resident",
+    {
+      method: "POST",
+      body: JSON.stringify({
+        unidadId: Number(unitId),
+        correo: emails.approval,
+      }),
+    }
+  );
+
+  const requestBody = await requestResponse.json();
+
+  assert.equal(
+    requestResponse.status,
+    201,
+    JSON.stringify(requestBody)
+  );
+
+  const solicitudId = Number(requestBody.solicitud.id);
+
+  // 2. El administrador aprueba la solicitud.
+  const reviewResponse = await send(
+    `/api/invitations/${solicitudId}/review`,
+    "admin",
+    {
+      method: "POST",
+      body: JSON.stringify({
+        decision: "aprobar",
+      }),
+    }
+  );
+
+  const reviewBody = await reviewResponse.json();
+
+  assert.equal(
+    reviewResponse.status,
+    200,
+    JSON.stringify(reviewBody)
+  );
+
+  assert.equal(reviewBody.estado, "aprobada");
+
+  const token = reviewBody.invitacion?.token;
+
+    assert.ok(
+    Number.isSafeInteger(Number(reviewBody.invitacion.id))
+  );
+
+  assert.equal(
+    reviewBody.invitacion.correoDestino,
+    emails.approval
+  );
+
+  assert.equal(typeof token, "string");
+  assert.ok(token.length >= 32);
+  assert.equal(reviewBody.invitacion.expiraEnHoras, 48);
+
+  // 3. Verificar el estado y el hash almacenado.
+  const stored = sql(`
+    SELECT
+      s.estado,
+      i.estado,
+      i.token_hash,
+      i.correo_destino,
+      (i.expira_en > NOW()),
+      (i.expira_en <= NOW() + INTERVAL '48 hours')
+    FROM admincond.solicitudes_residentes s
+    JOIN admincond.invitaciones i
+      ON i.solicitud_id = s.id
+    WHERE s.id = ${solicitudId}
+      AND s.condominio_id = ${ids.condo};
+  `).split("|");
+
+  assert.equal(stored.length, 6);
+  assert.equal(stored[0], "aprobada");
+  assert.equal(stored[1], "pendiente");
+  assert.equal(stored[3], emails.approval);
+  assert.equal(stored[4], "t");
+  assert.equal(stored[5], "t");
+
+  const expectedHash = createHash("sha256")
+    .update(token)
+    .digest("hex");
+
+  assert.equal(stored[2], expectedHash);
+  assert.notEqual(stored[2], token);
+  // D31: una invitación nueva todavía no se ha enviado.
+  const deliveryState = sql(`
+    SELECT
+      estado_entrega,
+      intentos_entrega,
+      ultimo_intento_en IS NULL,
+      enviado_en IS NULL
+    FROM admincond.invitaciones
+    WHERE solicitud_id = ${solicitudId};
+  `).split("|");
+
+  assert.deepEqual(deliveryState, [
+    "pendiente",
+    "0",
+    "t",
+    "t",
+  ]);
+  // D31: verificar el registro de un intento fallido
+  // directamente en PostgreSQL TEST.
+  const failedDelivery = sql(`
+    UPDATE admincond.invitaciones
+    SET
+      estado_entrega = 'fallido',
+      intentos_entrega = intentos_entrega + 1,
+      ultimo_intento_en = NOW(),
+      enviado_en = NULL
+    WHERE solicitud_id = ${solicitudId}
+      AND estado = 'pendiente'
+      AND estado_entrega = 'pendiente'
+    RETURNING
+      estado_entrega,
+      intentos_entrega,
+      ultimo_intento_en IS NOT NULL,
+      enviado_en IS NULL;
+  `).split("|");
+
+  assert.deepEqual(failedDelivery, [
+    "fallido",
+    "1",
+    "t",
+    "t",
+  ]);
+
+  // Simular que un intento posterior fue aceptado
+  // por el servidor SMTP.
+  const acceptedDelivery = sql(`
+    UPDATE admincond.invitaciones
+    SET
+      estado_entrega = 'enviado',
+      intentos_entrega = intentos_entrega + 1,
+      ultimo_intento_en = NOW(),
+      enviado_en = NOW()
+    WHERE solicitud_id = ${solicitudId}
+      AND estado = 'pendiente'
+      AND estado_entrega = 'fallido'
+    RETURNING
+      estado_entrega,
+      intentos_entrega,
+      ultimo_intento_en IS NOT NULL,
+      enviado_en IS NOT NULL;
+  `).split("|");
+
+  assert.deepEqual(acceptedDelivery, [
+    "enviado",
+    "2",
+    "t",
+    "t",
+  ]);
+
+  // 4. Otro usuario NO puede aceptar la invitación.
+  const unauthorizedResponse = await send(
+    "/api/invitations/accept",
+    "owner",
+    {
+      method: "POST",
+      body: JSON.stringify({ token }),
+    }
+  );
+
+  assert.equal(unauthorizedResponse.status, 403);
+
+  // 5. El destinatario correcto acepta desde la API.
+  const acceptResponse = await send(
+    "/api/invitations/accept",
+    "approval",
+    {
+      method: "POST",
+      body: JSON.stringify({ token }),
+    }
+  );
+
+  const acceptBody = await acceptResponse.json();
+
+  assert.equal(
+    acceptResponse.status,
+    200,
+    JSON.stringify(acceptBody)
+  );
+
+  assert.equal(
+    acceptBody.message,
+    "Invitación aceptada correctamente"
+  );
+
+  assert.equal(
+    String(acceptBody.unidadId),
+    String(unitId)
+  );
+
+  // 6. Confirmar que se utilizó la invitación.
+  const invitationState = sql(`
+    SELECT estado
+    FROM admincond.invitaciones
+    WHERE solicitud_id = ${solicitudId};
+  `);
+
+  assert.equal(invitationState, "utilizada");
+
+  // 7. Verificar que se crearon las relaciones correctas.
+  const membershipState = sql(`
+    SELECT
+      mc.rol,
+      mc.estado,
+      mco.rol,
+      mco.estado,
+      r.estado,
+      r.es_ocupante,
+      r.es_principal
+    FROM admincond.usuarios u
+    JOIN admincond.membresias_cliente mc
+      ON mc.usuario_id = u.id
+    JOIN admincond.condominios co
+      ON co.cliente_id = mc.cliente_id
+    JOIN admincond.membresias_condominio mco
+      ON mco.usuario_id = u.id
+     AND mco.cliente_id = mc.cliente_id
+     AND mco.condominio_id = co.id
+    JOIN admincond.relaciones_unidad r
+      ON r.usuario_id = u.id
+     AND r.condominio_id = co.id
+    WHERE u.correo = '${emails.approval}'
+      AND co.id = ${ids.condo}
+      AND r.unidad_id = ${unitId};
+  `).split("|");
+
+  assert.deepEqual(membershipState, [
+    "colaborador",
+    "activo",
+    "residente",
+    "activo",
+    "activo",
+    "t",
+    "f",
+  ]);
+
+  // 8. El token usado NO puede volver a aceptarse.
+  const reusedResponse = await send(
+    "/api/invitations/accept",
+    "approval",
+    {
+      method: "POST",
+      body: JSON.stringify({ token }),
+    }
+  );
+
+  assert.equal(reusedResponse.status, 400);
+
+  // El token permanece únicamente en memoria del test.
+});
+
+test("D31-16: dos conexiones compiten por reclamar una invitación", async () => {
+  // Crear una invitación temporal directamente en TEST.
+  // Este fixture es independiente de D31-01 y D31-02.
+  const tokenHash = createHash("sha256")
+    .update(randomBytes(32))
+    .digest("hex");
+
+  const invitationId = sql(`
+    WITH solicitud AS (
+      INSERT INTO admincond.solicitudes_residentes (
+        unidad_id,
+        condominio_id,
+        solicitado_por,
+        correo_invitado,
+        estado,
+        revisado_por,
+        revisada_en
+      )
+      SELECT
+        u.id,
+        u.condominio_id,
+        ${ids.resident},
+        '${emails.approval}',
+        'aprobada',
+        ${ids.admin},
+        NOW()
+      FROM admincond.unidades u
+      WHERE u.codigo = 'UNIT-A-${marker}'
+        AND u.condominio_id = ${ids.condo}
+      RETURNING id
+    )
+    INSERT INTO admincond.invitaciones (
+      solicitud_id,
+      token_hash,
+      correo_destino,
+      expira_en
+    )
+    SELECT
+      id,
+      '${tokenHash}',
+      '${emails.approval}',
+      NOW() + INTERVAL '48 hours'
+    FROM solicitud
+    RETURNING id;
+  `);
+
+  assert.match(invitationId, /^\d+$/);
+
+  // Dos conexiones independientes hacia PostgreSQL TEST.
+  const connection = {
+    host: "127.0.0.1",
+    port: 5434,
+    database: "admincond_test",
+    user: "admincond_test_api",
+    password: env.DB_PASSWORD,
+  };
+
+  const firstClient = new Client(connection);
+  const secondClient = new Client(connection);
+
+  try {
+    await Promise.all([
+      firstClient.connect(),
+      secondClient.connect(),
+    ]);
+
+    // Ambos intentan reclamar la misma invitación.
+    const results = await Promise.all([
+      claimInvitationDelivery(Number(invitationId), {
+        query: firstClient.query.bind(firstClient),
+      }),
+      claimInvitationDelivery(Number(invitationId), {
+        query: secondClient.query.bind(secondClient),
+      }),
+    ]);
+
+    const successfulClaims = results.filter(
+      (result) => result !== null
+    );
+
+    assert.equal(
+      successfulClaims.length,
+      1,
+      "Solo una conexión debe obtener el reclamo"
+    );
+
+    // El estado final debe ser 'enviando'.
+    const storedState = sql(`
+      SELECT estado_entrega
+      FROM admincond.invitaciones
+      WHERE id = ${invitationId};
+    `);
+
+    assert.equal(storedState, "enviando");
+    // Finalizar la entrega que fue reclamada correctamente.
+    // No se contacta ningún servidor SMTP real.
+    const recorded = await recordInvitationDelivery(
+      Number(invitationId),
+      true,
+      {
+        query: firstClient.query.bind(firstClient),
+      }
+    );
+
+    assert.equal(recorded.estado_entrega, "enviado");
+    assert.equal(recorded.intentos_entrega, 1);
+
+    // Verificar el estado persistido en PostgreSQL.
+    const finalState = sql(`
+      SELECT
+        estado_entrega,
+        intentos_entrega,
+        ultimo_intento_en IS NOT NULL,
+        enviado_en IS NOT NULL
+      FROM admincond.invitaciones
+      WHERE id = ${invitationId};
+    `).split("|");
+
+    assert.deepEqual(finalState, [
+      "enviado",
+      "1",
+      "t",
+      "t",
+    ]);
+
+    // No debe ser posible registrar por segunda vez
+    // una entrega que ya fue finalizada.
+    await assert.rejects(
+      recordInvitationDelivery(
+        Number(invitationId),
+        true,
+        {
+          query: secondClient.query.bind(secondClient),
+        }
+      ),
+      {
+        message:
+          "Invitación no disponible para registrar entrega",
+      }
+    );
+
+  } finally {
+    await Promise.allSettled([
+      firstClient.end(),
+      secondClient.end(),
+    ]);
+  }
+});
+
+test("D31-17: solo administrador autorizado reemite invitación fallida", async () => {
+  // Crear una invitación fallida independiente en TEST.
+  const oldToken = randomBytes(32).toString("base64url");
+
+  const oldHash = createHash("sha256")
+    .update(oldToken)
+    .digest("hex");
+
+  const invitationId = sql(`
+    WITH solicitud AS (
+      INSERT INTO admincond.solicitudes_residentes (
+        unidad_id,
+        condominio_id,
+        solicitado_por,
+        correo_invitado,
+        estado,
+        revisado_por,
+        revisada_en
+      )
+      SELECT
+        u.id,
+        u.condominio_id,
+        ${ids.resident},
+        '${emails.approval}',
+        'aprobada',
+        ${ids.admin},
+        NOW()
+      FROM admincond.unidades u
+      WHERE u.codigo = 'UNIT-A-${marker}'
+        AND u.condominio_id = ${ids.condo}
+      RETURNING id
+    )
+    INSERT INTO admincond.invitaciones (
+      solicitud_id,
+      token_hash,
+      correo_destino,
+      expira_en,
+      estado_entrega,
+      intentos_entrega
+    )
+    SELECT
+      id,
+      '${oldHash}',
+      '${emails.approval}',
+      NOW() + INTERVAL '48 hours',
+      'fallido',
+      1
+    FROM solicitud
+    RETURNING id;
+  `);
+
+  assert.match(invitationId, /^\d+$/);
+
+  const connection = {
+    host: "127.0.0.1",
+    port: 5434,
+    database: "admincond_test",
+    user: "admincond_test_api",
+    password: env.DB_PASSWORD,
+  };
+
+  const client = new Client(connection);
+
+  try {
+    await client.connect();
+
+    const query = client.query.bind(client);
+
+    // 1. Usuario no autorizado intenta reemitir.
+    const denied = await reissueFailedInvitation(
+      ids.outsider,
+      Number(invitationId),
+      { query }
+    );
+
+    assert.equal(denied, null);
+
+    // 2. Administrador autorizado reemite.
+    const reissued = await reissueFailedInvitation(
+      ids.admin,
+      Number(invitationId),
+      { query }
+    );
+
+    assert.ok(reissued);
+    assert.equal(
+      Number(reissued.invitationId),
+      Number(invitationId)
+    );
+    assert.equal(reissued.to, emails.approval);
+    assert.equal(reissued.expiresInHours, 48);
+    assert.equal(typeof reissued.token, "string");
+
+    // 3. Comprobar que el token cambió.
+    assert.notEqual(reissued.token, oldToken);
+
+    const newHash = createHash("sha256")
+      .update(reissued.token)
+      .digest("hex");
+
+    assert.notEqual(newHash, oldHash);
+
+    // 4. Verificar el nuevo estado en PostgreSQL.
+    const stored = sql(`
+      SELECT
+        token_hash,
+        estado_entrega,
+        intentos_entrega
+      FROM admincond.invitaciones
+      WHERE id = ${invitationId};
+    `).split("|");
+
+    assert.deepEqual(stored, [
+      newHash,
+      "pendiente",
+      "1",
+    ]);
+
+    // 5. El token anterior ya no puede aceptarse.
+    const oldTokenResponse = await send(
+      "/api/invitations/accept",
+      "approval",
+      {
+        method: "POST",
+        body: JSON.stringify({ token: oldToken }),
+      }
+    );
+
+    assert.equal(oldTokenResponse.status, 400);
+
+    // 6. Sin un nuevo fallo, no puede reemitirse otra vez.
+    const secondReissue = await reissueFailedInvitation(
+      ids.admin,
+      Number(invitationId),
+      { query }
+    );
+
+    assert.equal(secondReissue, null);
+  } finally {
+    await client.end();
+  }
+});
+
+test("D31-18: rechazo administrativo no genera invitación", async () => {
+  // Crear una solicitud pendiente exclusiva de esta prueba.
+  const solicitudId = sql(`
+    INSERT INTO admincond.solicitudes_residentes (
+      unidad_id,
+      condominio_id,
+      solicitado_por,
+      correo_invitado
+    )
+    SELECT
+      u.id,
+      u.condominio_id,
+      ${ids.resident},
+      '${emails.owner}',
+      FROM_PLACEHOLDER
+    FROM admincond.unidades u
+    WHERE u.codigo = 'UNIT-A-${marker}'
+      AND u.condominio_id = ${ids.condo}
+    RETURNING id;
+  `.replace(",\n      FROM_PLACEHOLDER", ""));
+
+  assert.match(solicitudId, /^\d+$/);
+
+  // El administrador rechaza mediante la API real.
+  const response = await send(
+    `/api/invitations/${solicitudId}/review`,
+    "admin",
+    {
+      method: "POST",
+      body: JSON.stringify({
+        decision: "rechazar",
+      }),
+    }
+  );
+
+  const body = await response.json();
+
+  assert.equal(response.status, 200, JSON.stringify(body));
+  assert.deepEqual(body, {
+    estado: "rechazada",
+  });
+
+  // Confirmar que PostgreSQL registró el rechazo.
+  const stored = sql(`
+    SELECT
+      estado,
+      revisado_por,
+      revisada_en IS NOT NULL
+    FROM admincond.solicitudes_residentes
+    WHERE id = ${solicitudId};
+  `).split("|");
+
+  assert.deepEqual(stored, [
+    "rechazada",
+    String(ids.admin),
+    "t",
+  ]);
+
+  // Rechazar no debe crear una invitación.
+  const invitationCount = sql(`
+    SELECT COUNT(*)
+    FROM admincond.invitaciones
+    WHERE solicitud_id = ${solicitudId};
+  `);
+
+  assert.equal(invitationCount, "0");
+
+  // No debe exponerse ningún token.
+  assert.equal(body.invitacion, undefined);
+});
+
+test("D31-19: sin SMTP permite rechazar, pero no aprobar", async () => {
+  const noMailUrl = "http://127.0.0.1:3002";
+
+  // Comprobar que la segunda API responde.
+  const health = await fetch(`${noMailUrl}/api/health`);
+  assert.equal(health.status, 200);
+
+  // Crea una solicitud pendiente en nuestra BD TEST.
+  function createPendingRequest() {
+    const solicitudId = sql(`
+      INSERT INTO admincond.solicitudes_residentes (
+        unidad_id,
+        condominio_id,
+        solicitado_por,
+        correo_invitado
+      )
+      SELECT
+        u.id,
+        u.condominio_id,
+        ${ids.resident},
+        '${emails.owner}'
+      FROM admincond.unidades u
+      WHERE u.codigo = 'UNIT-A-${marker}'
+        AND u.condominio_id = ${ids.condo}
+      RETURNING id;
+    `);
+
+    assert.match(solicitudId, /^\d+$/);
+    return solicitudId;
+  }
+
+  async function reviewOnNoMailApi(solicitudId, decision) {
+    return fetch(
+      `${noMailUrl}/api/invitations/${solicitudId}/review`,
+      {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${tokens.admin}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ decision }),
+      }
+    );
+  }
+
+  // 1. Rechazar debe funcionar sin SMTP.
+  const rejectedId = createPendingRequest();
+
+  const rejectResponse = await reviewOnNoMailApi(
+    rejectedId,
+    "rechazar"
+  );
+
+  const rejectBody = await rejectResponse.json();
+
+  assert.equal(
+    rejectResponse.status,
+    200,
+    JSON.stringify(rejectBody)
+  );
+
+  assert.deepEqual(rejectBody, {
+    estado: "rechazada",
+  });
+
+  const rejectedState = sql(`
+    SELECT estado
+    FROM admincond.solicitudes_residentes
+    WHERE id = ${rejectedId};
+  `);
+
+  assert.equal(rejectedState, "rechazada");
+
+  // 2. Crear otra solicitud independiente.
+  const approvalId = createPendingRequest();
+
+  // Intentar aprobar sin SMTP debe responder 503.
+  const approvalResponse = await reviewOnNoMailApi(
+    approvalId,
+    "aprobar"
+  );
+
+  const approvalBody = await approvalResponse.json();
+
+  assert.equal(
+    approvalResponse.status,
+    503,
+    JSON.stringify(approvalBody)
+  );
+
+  assert.equal(
+    approvalBody.message,
+    "Servicio de invitaciones no disponible"
+  );
+
+  assert.equal(approvalBody.invitacion, undefined);
+
+  // 3. Verificar que la solicitud NO fue aprobada.
+  const approvalState = sql(`
+    SELECT estado
+    FROM admincond.solicitudes_residentes
+    WHERE id = ${approvalId};
+  `);
+
+  assert.equal(approvalState, "pendiente");
+
+  // 4. Verificar que NO se creó ninguna invitación.
+  const invitationCount = sql(`
+    SELECT COUNT(*)
+    FROM admincond.invitaciones
+    WHERE solicitud_id = ${approvalId};
+  `);
+
+  assert.equal(invitationCount, "0");
+});
+
+test("D31-20: API permite reemisión solo a administrador autorizado", async () => {
+  // Crear una invitación fallida exclusiva de esta prueba.
+  const oldToken = randomBytes(32).toString("base64url");
+
+  const oldHash = createHash("sha256")
+    .update(oldToken)
+    .digest("hex");
+
+  const invitationId = sql(`
+    WITH solicitud AS (
+      INSERT INTO admincond.solicitudes_residentes (
+        unidad_id,
+        condominio_id,
+        solicitado_por,
+        correo_invitado,
+        estado,
+        revisado_por,
+        revisada_en
+      )
+      SELECT
+        u.id,
+        u.condominio_id,
+        ${ids.resident},
+        '${emails.approval}',
+        'aprobada',
+        ${ids.admin},
+        NOW()
+      FROM admincond.unidades u
+      WHERE u.codigo = 'UNIT-A-${marker}'
+        AND u.condominio_id = ${ids.condo}
+      RETURNING id
+    )
+    INSERT INTO admincond.invitaciones (
+      solicitud_id,
+      token_hash,
+      correo_destino,
+      expira_en,
+      estado_entrega,
+      intentos_entrega
+    )
+    SELECT
+      id,
+      '${oldHash}',
+      '${emails.approval}',
+      NOW() + INTERVAL '48 hours',
+      'fallido',
+      1
+    FROM solicitud
+    RETURNING id;
+  `);
+
+  assert.match(invitationId, /^\d+$/);
+
+  const path = `/api/invitations/${invitationId}/reissue`;
+
+  // 1. Un usuario externo no puede reemitir.
+  const deniedResponse = await send(
+    path,
+    "outsider",
+    { method: "POST" }
+  );
+
+  assert.equal(deniedResponse.status, 404);
+
+  // 2. El administrador autorizado sí puede reemitir.
+  const approvedResponse = await send(
+    path,
+    "admin",
+    { method: "POST" }
+  );
+
+  const approvedBody = await approvedResponse.json();
+
+  assert.equal(
+    approvedResponse.status,
+    200,
+    JSON.stringify(approvedBody)
+  );
+
+  assert.equal(approvedBody.estado, "reemitida");
+
+  const newToken = approvedBody.invitacion?.token;
+
+  assert.equal(typeof newToken, "string");
+  assert.ok(newToken.length >= 32);
+  assert.notEqual(newToken, oldToken);
+
+  assert.equal(
+    approvedBody.invitacion.correoDestino,
+    emails.approval
+  );
+
+  // 3. PostgreSQL debe almacenar el nuevo hash,
+  // nunca el token original.
+  const newHash = createHash("sha256")
+    .update(newToken)
+    .digest("hex");
+
+  const stored = sql(`
+    SELECT
+      token_hash,
+      estado_entrega,
+      intentos_entrega
+    FROM admincond.invitaciones
+    WHERE id = ${invitationId};
+  `).split("|");
+
+  assert.deepEqual(stored, [
+    newHash,
+    "pendiente",
+    "1",
+  ]);
+
+  // 4. El token anterior debe haber perdido validez.
+  const oldTokenResponse = await send(
+    "/api/invitations/accept",
+    "approval",
+    {
+      method: "POST",
+      body: JSON.stringify({
+        token: oldToken,
+      }),
+    }
+  );
+
+  assert.equal(oldTokenResponse.status, 400);
+
+  // 5. No se puede reemitir otra vez sin un nuevo fallo.
+  const repeatedResponse = await send(
+    path,
+    "admin",
+    { method: "POST" }
+  );
+
+  assert.equal(repeatedResponse.status, 404);
+
+  // No mostramos tokens en logs ni los guardamos en archivos.
+});
+
+test("D31-21: aprobación HTTP procesa correo simulado sin exponer token", async () => {
+  const mailApiUrl = "http://127.0.0.1:3003";
+
+  // 1. Comprobar la API de correo simulado.
+  const health = await fetch(`${mailApiUrl}/api/health`);
+
+  assert.equal(health.status, 200);
+
+  // 2. Crear una solicitud pendiente exclusiva de esta prueba.
+  // Utilizamos el destinatario approval, que ya es
+  // una cuenta activa de nuestro laboratorio TEST.
+  const solicitudId = sql(`
+    INSERT INTO admincond.solicitudes_residentes (
+      unidad_id,
+      condominio_id,
+      solicitado_por,
+      correo_invitado
+    )
+    SELECT
+      u.id,
+      u.condominio_id,
+      ${ids.resident},
+      '${emails.approval}'
+    FROM admincond.unidades u
+    WHERE u.codigo = 'UNIT-A-${marker}'
+      AND u.condominio_id = ${ids.condo}
+    RETURNING id;
+  `);
+
+  assert.match(solicitudId, /^\d+$/);
+
+  // 3. Aprobar desde la API con transporte simulado.
+  const response = await fetch(
+    `${mailApiUrl}/api/invitations/${solicitudId}/review`,
+    {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${tokens.admin}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        decision: "aprobar",
+      }),
+    }
+  );
+
+  const body = await response.json();
+
+  assert.equal(
+    response.status,
+    200,
+    JSON.stringify(body)
+  );
+
+  assert.deepEqual(body, {
+    estado: "aprobada",
+    entrega: "enviado",
+  });
+
+  // 4. Verificar que el servidor no expuso el token.
+  assert.equal(body.invitacion, undefined);
+  assert.equal(body.token, undefined);
+  assert.equal(body.refreshToken, undefined);
+
+  // 5. Confirmar el estado de solicitud e invitación
+  // directamente en PostgreSQL TEST.
+  const stored = sql(`
+    SELECT
+      s.estado,
+      i.estado,
+      i.estado_entrega,
+      i.intentos_entrega,
+      i.ultimo_intento_en IS NOT NULL,
+      i.enviado_en IS NOT NULL,
+      i.correo_destino,
+      LENGTH(i.token_hash)
+    FROM admincond.solicitudes_residentes s
+    JOIN admincond.invitaciones i
+      ON i.solicitud_id = s.id
+    WHERE s.id = ${solicitudId}
+      AND s.condominio_id = ${ids.condo};
+  `).split("|");
+
+  assert.deepEqual(stored, [
+    "aprobada",
+    "pendiente",
+    "enviado",
+    "1",
+    "t",
+    "t",
+    emails.approval,
+    "64",
+  ]);
+
+  // 6. La invitación sigue pendiente de aceptación.
+  // Que el transporte haya procesado el mensaje
+  // no significa que el destinatario ya lo aceptó.
 });
