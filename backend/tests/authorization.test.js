@@ -2550,3 +2550,312 @@ test("D31-21: aprobación HTTP procesa correo simulado sin exponer token", async
   // Que el transporte haya procesado el mensaje
   // no significa que el destinatario ya lo aceptó.
 });
+
+test("D32-01: membresía revocada bloquea permiso financiero activo", async () => {
+  const unidadId = sql(`
+    SELECT id
+    FROM admincond.unidades
+    WHERE condominio_id = ${ids.condo}
+      AND codigo = 'UNIT-A-${marker}';
+  `);
+
+  assert.match(unidadId, /^\d+$/);
+
+  // D28-03 dejó revocado el permiso crear_cuotas.
+  // Lo activamos nuevamente para aislar la condición
+  // que queremos comprobar: la membresía del condominio.
+  const permisoActualizado = sql(`
+    UPDATE admincond.permisos_financieros
+    SET estado = 'activo',
+        revocado_por = NULL,
+        revocado_en = NULL
+    WHERE usuario_id = ${ids.admin}
+      AND condominio_id = ${ids.condo}
+      AND permiso = 'crear_cuotas'
+      AND estado = 'revocado'
+    RETURNING id;
+  `);
+
+  assert.match(
+    permisoActualizado,
+    /^\d+$/,
+    "Debe existir el permiso revocado creado por D28-03"
+  );
+
+  try {
+    // Revocar únicamente la membresía del condominio.
+    // El permiso financiero permanece activo.
+    sql(`
+      UPDATE admincond.membresias_condominio
+      SET estado = 'revocado'
+      WHERE usuario_id = ${ids.admin}
+        AND condominio_id = ${ids.condo};
+    `);
+
+    const response = await send(
+      "/api/finance/fees",
+      "admin",
+      {
+        method: "POST",
+        body: JSON.stringify({
+          unidadId: Number(unidadId),
+          concepto: "Seguridad membresía D32",
+          periodo: "2028-04-01",
+          monto: "150.00",
+          vencimiento: "2028-04-30",
+        }),
+      }
+    );
+
+    assert.equal(response.status, 404);
+
+    // Confirmar que PostgreSQL no creó ninguna cuota.
+    const cuotasCreadas = sql(`
+      SELECT COUNT(*)
+      FROM admincond.cuotas
+      WHERE unidad_id = ${unidadId}
+        AND concepto = 'Seguridad membresía D32';
+    `);
+
+    assert.equal(cuotasCreadas, "0");
+
+    // Comprobar que el permiso sigue activo:
+    // el bloqueo debe provenir de la membresía revocada.
+    const estadoPermiso = sql(`
+      SELECT estado
+      FROM admincond.permisos_financieros
+      WHERE id = ${permisoActualizado};
+    `);
+
+    assert.equal(estadoPermiso, "activo");
+  } finally {
+    // Restaurar la membresía para no afectar
+    // las demás pruebas ni dejar datos alterados.
+    sql(`
+      UPDATE admincond.membresias_condominio
+      SET estado = 'activo'
+      WHERE usuario_id = ${ids.admin}
+        AND condominio_id = ${ids.condo};
+    `);
+
+    sql(`
+      UPDATE admincond.permisos_financieros
+      SET estado = 'revocado',
+          revocado_por = ${ids.admin},
+          revocado_en = NOW()
+      WHERE id = ${permisoActualizado};
+    `);
+  }
+});
+
+test("D32-02: relación revocada bloquea cuotas y pagos", async () => {
+  // Crear una cuota exclusiva de esta prueba.
+  const cuotaId = sql(`
+    INSERT INTO admincond.cuotas (
+      condominio_id,
+      unidad_id,
+      concepto,
+      periodo,
+      monto,
+      vencimiento,
+      creada_por
+    )
+    SELECT
+      u.condominio_id,
+      u.id,
+      'Seguridad relación D32-${marker}',
+      '2028-05-01',
+      120.00,
+      '2028-05-31',
+      ${ids.admin}
+    FROM admincond.unidades u
+    WHERE u.condominio_id = ${ids.condo}
+      AND u.codigo = 'UNIT-A-${marker}'
+    RETURNING id;
+  `);
+
+  assert.match(cuotaId, /^\d+$/);
+
+  // Confirmar que el residente ve su cuota antes
+  // de revocar la relación con su unidad.
+  const antes = await send(
+    "/api/finance/fees/mine",
+    "resident"
+  );
+
+  assert.equal(antes.status, 200);
+
+  const cuotasAntes = await antes.json();
+
+  assert.ok(
+    cuotasAntes.cuotas.some(
+      (cuota) => String(cuota.id) === cuotaId
+    ),
+    "El residente debe ver su cuota antes de la revocación"
+  );
+
+  try {
+    // Revocar solamente la relación con la Unidad A.
+    sql(`
+      UPDATE admincond.relaciones_unidad
+      SET estado = 'revocado'
+      WHERE usuario_id = ${ids.resident}
+        AND condominio_id = ${ids.condo}
+        AND unidad_id = (
+          SELECT id
+          FROM admincond.unidades
+          WHERE condominio_id = ${ids.condo}
+            AND codigo = 'UNIT-A-${marker}'
+        );
+    `);
+
+    // 1. El residente ya no debe ver la cuota.
+    const despues = await send(
+      "/api/finance/fees/mine",
+      "resident"
+    );
+
+    assert.equal(despues.status, 200);
+
+    const cuotasDespues = await despues.json();
+
+    assert.ok(
+      cuotasDespues.cuotas.every(
+        (cuota) => String(cuota.id) !== cuotaId
+      ),
+      "La cuota no debe ser visible tras revocar la relación"
+    );
+
+    // 2. Tampoco debe poder reportar un pago.
+    const pago = await send(
+      "/api/finance/payments",
+      "resident",
+      {
+        method: "POST",
+        body: JSON.stringify({
+          cuotaId: Number(cuotaId),
+          monto: "20.00",
+          referencia: "PAGO-BLOQUEADO-D32",
+        }),
+      }
+    );
+
+    assert.equal(pago.status, 404);
+
+    // 3. Comprobar que no se registró el pago.
+    const pagosCreados = sql(`
+      SELECT COUNT(*)
+      FROM admincond.pagos
+      WHERE cuota_id = ${cuotaId}
+        AND referencia = 'PAGO-BLOQUEADO-D32';
+    `);
+
+    assert.equal(pagosCreados, "0");
+
+    // Las membresías siguen activas.
+    // El bloqueo debe provenir de la relación revocada.
+    const membresias = sql(`
+      SELECT
+        (SELECT estado
+         FROM admincond.membresias_cliente
+         WHERE usuario_id = ${ids.resident}
+           AND cliente_id = (
+             SELECT cliente_id
+             FROM admincond.condominios
+             WHERE id = ${ids.condo}
+           ))
+        || '|' ||
+        (SELECT estado
+         FROM admincond.membresias_condominio
+         WHERE usuario_id = ${ids.resident}
+           AND condominio_id = ${ids.condo});
+    `);
+
+    assert.equal(membresias, "activo|activo");
+  } finally {
+    // Restaurar la relación original.
+    sql(`
+      UPDATE admincond.relaciones_unidad
+      SET estado = 'activo'
+      WHERE usuario_id = ${ids.resident}
+        AND condominio_id = ${ids.condo}
+        AND unidad_id = (
+          SELECT id
+          FROM admincond.unidades
+          WHERE condominio_id = ${ids.condo}
+            AND codigo = 'UNIT-A-${marker}'
+        );
+    `);
+  }
+});
+
+test("D32-03: administrador no consulta unidades de otro cliente", async () => {
+  // Obtener el condominio B, que pertenece a otro cliente.
+  const condominioB = sql(`
+    SELECT id
+    FROM admincond.condominios
+    WHERE nombre = 'CONDO-B-${marker}';
+  `);
+
+  assert.match(condominioB, /^\d+$/);
+
+  assert.notEqual(
+    condominioB,
+    String(ids.condo),
+    "Los condominios deben ser diferentes"
+  );
+
+  // 1. El administrador puede consultar su condominio A.
+  const autorizado = await send(
+    `/api/units/condominium/${ids.condo}`,
+    "admin"
+  );
+
+  assert.equal(autorizado.status, 200);
+
+  const datosAutorizados = await autorizado.json();
+
+  assert.ok(Array.isArray(datosAutorizados.unidades));
+
+  assert.ok(
+    datosAutorizados.unidades.some(
+      (unidad) => unidad.codigo === `UNIT-A-${marker}`
+    ),
+    "Debe visualizar las unidades de su condominio"
+  );
+
+  // 2. Cambiar manualmente el ID al condominio B
+  // no debe permitir acceder a sus datos.
+  const denegado = await send(
+    `/api/units/condominium/${condominioB}`,
+    "admin"
+  );
+
+  assert.equal(denegado.status, 404);
+
+  // 3. Comprobar también el acceso inverso:
+  // el usuario del cliente B no puede listar
+  // las unidades del condominio A.
+  const inverso = await send(
+    `/api/units/condominium/${ids.condo}`,
+    "outsider"
+  );
+
+  assert.equal(inverso.status, 404);
+
+  // 4. Confirmar que ambos condominios
+  // pertenecen realmente a clientes distintos.
+  const clientes = sql(`
+    SELECT
+      (SELECT cliente_id
+       FROM admincond.condominios
+       WHERE id = ${ids.condo})
+      || '|' ||
+      (SELECT cliente_id
+       FROM admincond.condominios
+       WHERE id = ${condominioB});
+  `).split("|");
+
+  assert.equal(clientes.length, 2);
+  assert.notEqual(clientes[0], clientes[1]);
+});
