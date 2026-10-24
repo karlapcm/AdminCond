@@ -1,4 +1,3 @@
-
 import { Router } from "express";
 import { rateLimit } from "express-rate-limit";
 import { z } from "zod";
@@ -11,6 +10,18 @@ import {
   reviewRequest,
   acceptInvitation,
 } from "./invitation.service.js";
+
+import {
+  assertInvitationMailConfigured,
+} from "./invitation.mailer.js";
+
+import {
+  dispatchInvitation,
+} from "./invitation.dispatch.js";
+
+import {
+  reissueFailedInvitation,
+} from "./invitation.reissue.js";
 
 export const invitationRouter = Router();
 
@@ -79,17 +90,15 @@ invitationRouter.get(
 
 // POST /api/invitations/:id/review
 // Administrador aprueba o rechaza.
+
 invitationRouter.post(
   "/:id/review",
   limiter,
   asyncHandler(async (req, res) => {
-    // Entrega manual del token exclusivamente
-    // para el laboratorio local.
-    if (process.env.ALLOW_DEV_INVITATION_TOKENS !== "true") {
-      return res.status(503).json({
-        message: "Configura primero la entrega de invitaciones",
-      });
-    }
+    const isTestLab =
+      process.env.NODE_ENV === "test" &&
+      process.env.DB_NAME === "admincond_test" &&
+      process.env.ALLOW_DEV_INVITATION_TOKENS === "true";
 
     const id = idSchema.safeParse(req.params.id);
 
@@ -103,13 +112,121 @@ invitationRouter.post(
       });
     }
 
+    // Solo aprobar requiere generar y entregar una invitación.
+    // Rechazar debe funcionar aunque SMTP no esté configurado.
+    if (!isTestLab && body.data.decision === "aprobar") {
+      try {
+        assertInvitationMailConfigured();
+      } catch {
+        return res.status(503).json({
+          message: "Servicio de invitaciones no disponible",
+        });
+      }
+    }
+
     const result = await reviewRequest(
       req.user.id,
       id.data,
       body.data.decision
     );
 
-    res.json(result);
+    if (body.data.decision === "rechazar") {
+      return res.json({
+        estado: "rechazada",
+      });
+    }
+
+    // Exclusivamente TEST: conserva el token para
+    // las pruebas automatizadas.
+    if (isTestLab) {
+      return res.json(result);
+    }
+
+    // Producción: token únicamente en memoria del backend.
+    const invitation = result.invitacion;
+
+    const delivery = await dispatchInvitation({
+      invitationId: invitation.id,
+      to: invitation.correoDestino,
+      token: invitation.token,
+      expiresInHours: invitation.expiraEnHoras,
+    });
+
+    // Nunca devolver el token al navegador.
+    return res.json({
+      estado: "aprobada",
+      entrega: delivery.estadoEntrega,
+    });
+  })
+);
+/**
+ * POST /api/invitations/:id/reissue
+ *
+ * Reemite una invitación cuya entrega falló.
+ * La autorización se verifica en PostgreSQL.
+ *
+ * No reintenta automáticamente estados inciertos.
+ */
+invitationRouter.post(
+  "/:id/reissue",
+  limiter,
+  asyncHandler(async (req, res) => {
+    const isTestLab =
+      process.env.NODE_ENV === "test" &&
+      process.env.DB_NAME === "admincond_test" &&
+      process.env.ALLOW_DEV_INVITATION_TOKENS === "true";
+
+    const id = idSchema.safeParse(req.params.id);
+
+    if (!id.success) {
+      return res.status(400).json({
+        message: "Identificador inválido",
+      });
+    }
+
+    // Fuera de TEST exigimos SMTP antes de cambiar
+    // el token y su estado en PostgreSQL.
+    if (!isTestLab) {
+      try {
+        assertInvitationMailConfigured();
+      } catch {
+        return res.status(503).json({
+          message: "Servicio de invitaciones no disponible",
+        });
+      }
+    }
+
+    const invitation = await reissueFailedInvitation(
+      req.user.id,
+      id.data
+    );
+
+    if (!invitation) {
+      return res.status(404).json({
+        message: "Invitación no disponible para reemisión",
+      });
+    }
+
+    // Únicamente laboratorio aislado TEST.
+    if (isTestLab) {
+      return res.json({
+        estado: "reemitida",
+        invitacion: {
+          id: invitation.invitationId,
+          token: invitation.token,
+          correoDestino: invitation.to,
+          expiraEnHoras: invitation.expiresInHours,
+        },
+      });
+    }
+
+    // En producción nunca devolvemos el token.
+    const delivery = await dispatchInvitation(invitation);
+
+    return res.json({
+      estado: "reemitida",
+      entrega: delivery.estadoEntrega,
+    });
   })
 );
 

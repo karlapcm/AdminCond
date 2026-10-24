@@ -11,7 +11,7 @@ permissions:
 
 jobs:
   backend-tests:
-    name: Backend - 23 pruebas
+    name: Backend - 69 pruebas
     runs-on: ubuntu-latest
     timeout-minutes: 15
 
@@ -53,7 +53,7 @@ jobs:
           docker compose -f compose.test.yaml exec -T postgres-test \
             psql -X -v ON_ERROR_STOP=1 -U postgres -d admincond_test \
             < backend/sql/test/000_bootstrap_test.sql
-          for migration in backend/sql/00[1-8]_*.sql; do
+          for migration in backend/sql/[0-9][0-9][0-9]_*.sql; do
             echo "Aplicando $(basename "$migration")"
             docker compose -f compose.test.yaml exec -T postgres-test \
               psql -X -v ON_ERROR_STOP=1 -U postgres -d admincond_test \
@@ -66,21 +66,42 @@ jobs:
             psql -X -v ON_ERROR_STOP=1 -U postgres -d admincond_test \
             -c 'GRANT admincond_app TO admincond_test_api;'
 
-      - name: Iniciar API de TEST
-        run: docker compose -f compose.test.yaml up -d --build --wait api-test
+      - name: Iniciar las API de TEST
+        run: |
+          docker compose -f compose.test.yaml up -d --build \
+            api-test api-test-no-mail api-test-mail
 
-      - name: Comprobar disponibilidad de API de TEST
+      - name: Comprobar disponibilidad de las API de TEST
         shell: bash
         run: |
           set -euo pipefail
-          for i in $(seq 1 30); do
-            if curl --fail --silent http://127.0.0.1:3001/api/health/db > /dev/null; then
-              exit 0
+
+          for port in 3001 3002 3003; do
+            echo "Comprobando API del puerto $port"
+
+            ready=false
+
+            for i in $(seq 1 30); do
+              if curl --fail --silent \
+                "http://127.0.0.1:${port}/api/health/db" \
+                > /dev/null; then
+                ready=true
+                break
+              fi
+
+              sleep 2
+            done
+
+            if [ "$ready" != "true" ]; then
+              echo "La API del puerto $port no respondió"
+              docker compose -f compose.test.yaml logs \
+                --no-color --tail=100 \
+                api-test api-test-no-mail api-test-mail
+              exit 1
             fi
-            sleep 2
           done
-          docker compose -f compose.test.yaml logs --no-color api-test
-          exit 1
+
+          echo "Las tres API de TEST están disponibles"
 
       - name: Ejecutar suite de backend
         working-directory: backend
@@ -88,7 +109,10 @@ jobs:
 
       - name: Mostrar logs si falla
         if: failure()
-        run: docker compose -f compose.test.yaml logs --no-color --tail=100 api-test postgres-test
+        run: |
+          docker compose -f compose.test.yaml logs \
+            --no-color --tail=100 \
+            api-test api-test-no-mail api-test-mail postgres-test
 
       - name: Detener servicios TEST
         if: always()

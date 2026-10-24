@@ -210,10 +210,11 @@ export async function reviewRequest(userId, requestId, decision) {
 
     const token = randomBytes(32).toString("base64url");
 
-    await db.query(
+    const invitationResult = await db.query(
       `INSERT INTO admincond.invitaciones
-         (solicitud_id, token_hash, correo_destino, expira_en)
-       VALUES ($1, $2, $3, NOW() + INTERVAL '48 hours')`,
+        (solicitud_id, token_hash, correo_destino, expira_en)
+      VALUES ($1, $2, $3, NOW() + INTERVAL '48 hours')
+      RETURNING id`,
       [requestId, hashToken(token), request.correo_invitado]
     );
 
@@ -222,6 +223,8 @@ export async function reviewRequest(userId, requestId, decision) {
     return {
       estado: "aprobada",
       invitacion: {
+        id: invitationResult.rows[0].id,
+        correoDestino: request.correo_invitado,
         token,
         expiraEnHoras: INVITATION_HOURS,
       },

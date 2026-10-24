@@ -189,10 +189,32 @@ export default function Invitations() {
       );
 
       if (decision === "aprobar") {
-        setReviewMessage(
-          `Solicitud #${solicitud.id} aprobada.`
-        );
+        if (result?.entrega === "enviado") {
+          setReviewMessage(
+            `Solicitud #${solicitud.id} aprobada. ` +
+            "El servicio de correo procesó la invitación."
+          );
+        } else if (result?.entrega === "fallido") {
+          setReviewMessage(
+            `Solicitud #${solicitud.id} aprobada, ` +
+            "pero el envío del correo falló. " +
+            "Un administrador deberá gestionar la reemisión."
+          );
+        } else if (result?.entrega === "no_disponible") {
+          setReviewMessage(
+            `Solicitud #${solicitud.id} aprobada, ` +
+            "pero no se pudo iniciar la entrega. " +
+            "Requiere revisión administrativa."
+          );
+        } else {
+          // Modo laboratorio TEST.
+          setReviewMessage(
+            `Solicitud #${solicitud.id} aprobada.`
+          );
+        }
 
+        // Solo existe en el laboratorio cuando la API
+        // devuelve expresamente el token temporal.
         if (result?.invitacion?.token) {
           setDevInvitation({
             solicitudId: solicitud.id,
@@ -201,6 +223,7 @@ export default function Invitations() {
             expiresIn: result.invitacion.expiraEnHoras,
           });
         }
+
       } else {
         setReviewMessage(
           `Solicitud #${solicitud.id} rechazada.`
