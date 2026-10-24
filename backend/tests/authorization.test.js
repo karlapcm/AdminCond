@@ -2859,3 +2859,365 @@ test("D32-03: administrador no consulta unidades de otro cliente", async () => {
   assert.equal(clientes.length, 2);
   assert.notEqual(clientes[0], clientes[1]);
 });
+
+test("D33-01: administrador no accede a otro condominio del mismo cliente", async () => {
+  // Crear un segundo condominio dentro del Cliente A,
+  // sin asignarle membresía al administrador.
+  const condominioC = sql(`
+    WITH cliente AS (
+      SELECT cliente_id
+      FROM admincond.condominios
+      WHERE id = ${ids.condo}
+    )
+    INSERT INTO admincond.condominios (
+      cliente_id,
+      nombre
+    )
+    SELECT
+      cliente_id,
+      'CONDO-C-D33-${marker}'
+    FROM cliente
+    RETURNING id;
+  `);
+
+  assert.match(condominioC, /^\d+$/);
+
+  try {
+    // Crear una unidad en el nuevo condominio.
+    const unidadC = sql(`
+      INSERT INTO admincond.unidades (
+        condominio_id,
+        codigo,
+        tipo
+      )
+      VALUES (
+        ${condominioC},
+        'UNIT-C-D33-${marker}',
+        'casa'
+      )
+      RETURNING id;
+    `);
+
+    assert.match(unidadC, /^\d+$/);
+
+    // 1. Ambos condominios pertenecen al mismo cliente.
+    const clientes = sql(`
+      SELECT
+        (SELECT cliente_id
+         FROM admincond.condominios
+         WHERE id = ${ids.condo})
+        || '|' ||
+        (SELECT cliente_id
+         FROM admincond.condominios
+         WHERE id = ${condominioC});
+    `).split("|");
+
+    assert.equal(clientes.length, 2);
+    assert.equal(clientes[0], clientes[1]);
+
+    // 2. El administrador tiene acceso al Condominio A.
+    const permitido = await send(
+      `/api/units/condominium/${ids.condo}`,
+      "admin"
+    );
+
+    assert.equal(permitido.status, 200);
+
+    const datosPermitidos = await permitido.json();
+
+    assert.ok(
+      datosPermitidos.unidades.some(
+        (unidad) => unidad.codigo === `UNIT-A-${marker}`
+      )
+    );
+
+    // 3. Confirmar que no tiene membresía en Condominio C.
+    const membresiasC = sql(`
+      SELECT COUNT(*)
+      FROM admincond.membresias_condominio
+      WHERE usuario_id = ${ids.admin}
+        AND condominio_id = ${condominioC};
+    `);
+
+    assert.equal(membresiasC, "0");
+
+    // 4. Cambiar el ID de la URL no debe dar acceso.
+    const denegado = await send(
+      `/api/units/condominium/${condominioC}`,
+      "admin"
+    );
+
+    assert.equal(denegado.status, 404);
+
+    // 5. Confirmar que la unidad realmente existe.
+    // Así evitamos un falso positivo causado
+    // por consultar un condominio vacío.
+    const unidadPersistida = sql(`
+      SELECT id
+      FROM admincond.unidades
+      WHERE id = ${unidadC}
+        AND condominio_id = ${condominioC};
+    `);
+
+    assert.equal(unidadPersistida, unidadC);
+  } finally {
+    // Eliminar solo los datos creados por D33-01.
+    sql(`
+      DELETE FROM admincond.unidades
+      WHERE condominio_id = ${condominioC}
+        AND codigo = 'UNIT-C-D33-${marker}';
+
+      DELETE FROM admincond.condominios
+      WHERE id = ${condominioC}
+        AND nombre = 'CONDO-C-D33-${marker}';
+    `);
+  }
+});
+
+test("D33-02: comunicados aislados entre condominios del mismo cliente", async () => {
+  // Crear Condominio D dentro del mismo Cliente A.
+  const condominioD = sql(`
+    INSERT INTO admincond.condominios (
+      cliente_id,
+      nombre
+    )
+    SELECT
+      cliente_id,
+      'CONDO-D-D33-${marker}'
+    FROM admincond.condominios
+    WHERE id = ${ids.condo}
+    RETURNING id;
+  `);
+
+  assert.match(condominioD, /^\d+$/);
+
+  try {
+    // Crear un comunicado de laboratorio en D.
+    const comunicadoD = sql(`
+      INSERT INTO admincond.comunicados (
+        cliente_id,
+        condominio_id,
+        autor_id,
+        titulo,
+        contenido
+      )
+      SELECT
+        cliente_id,
+        id,
+        ${ids.admin},
+        'Comunicado privado D33',
+        'Contenido exclusivo del Condominio D'
+      FROM admincond.condominios
+      WHERE id = ${condominioD}
+      RETURNING id;
+    `);
+
+    assert.match(comunicadoD, /^\d+$/);
+
+    // 1. El administrador conserva acceso a A.
+    const permitido = await send(
+      `/api/communications?condominioId=${ids.condo}`,
+      "admin"
+    );
+
+    assert.equal(permitido.status, 200);
+
+    // 2. No puede listar comunicados de D.
+    const listadoD = await send(
+      `/api/communications?condominioId=${condominioD}`,
+      "admin"
+    );
+
+    assert.equal(listadoD.status, 404);
+
+    // 3. Tampoco puede acceder directamente
+    // al comunicado mediante su ID.
+    const detalleD = await send(
+      `/api/communications/${comunicadoD}`,
+      "admin"
+    );
+
+    assert.equal(detalleD.status, 404);
+
+    // 4. No puede publicar un comunicado en D.
+    const publicacionD = await send(
+      "/api/communications",
+      "admin",
+      {
+        method: "POST",
+        body: JSON.stringify({
+          condominioId: Number(condominioD),
+          titulo: "Publicación no autorizada D33",
+          contenido: "Este comunicado no debe crearse",
+        }),
+      }
+    );
+
+    assert.equal(publicacionD.status, 404);
+
+    // 5. PostgreSQL debe confirmar
+    // que el comunicado no fue creado.
+    const publicacionesNoAutorizadas = sql(`
+      SELECT COUNT(*)
+      FROM admincond.comunicados
+      WHERE condominio_id = ${condominioD}
+        AND titulo = 'Publicación no autorizada D33';
+    `);
+
+    assert.equal(publicacionesNoAutorizadas, "0");
+
+    // 6. Verificar que el comunicado privado
+    // realmente existe en el Condominio D.
+    const comunicadoPersistido = sql(`
+      SELECT id
+      FROM admincond.comunicados
+      WHERE id = ${comunicadoD}
+        AND condominio_id = ${condominioD};
+    `);
+
+    assert.equal(comunicadoPersistido, comunicadoD);
+
+    // 7. Verificar que D pertenece al mismo cliente.
+    const mismoCliente = sql(`
+      SELECT EXISTS (
+        SELECT 1
+        FROM admincond.condominios a
+        JOIN admincond.condominios d
+          ON d.cliente_id = a.cliente_id
+        WHERE a.id = ${ids.condo}
+          AND d.id = ${condominioD}
+      );
+    `);
+
+    assert.equal(mismoCliente, "t");
+  } finally {
+    // Limpiar los datos exclusivos de D33-02.
+    // Primero los comunicados por su clave foránea.
+    sql(`
+      DELETE FROM admincond.comunicados
+      WHERE condominio_id = ${condominioD}
+        AND titulo IN (
+          'Comunicado privado D33',
+          'Publicación no autorizada D33'
+        );
+
+      DELETE FROM admincond.condominios
+      WHERE id = ${condominioD}
+        AND nombre = 'CONDO-D-D33-${marker}';
+    `);
+  }
+});
+
+test("D33-03: renovar sesión invalida el refresh token anterior", async () => {
+  // Crear una sesión independiente para esta prueba.
+  // No modificamos las sesiones de los demás fixtures.
+  const sessionId = randomUUID();
+  const refreshOriginal = randomBytes(32).toString("base64url");
+
+  const hashOriginal = createHash("sha256")
+    .update(refreshOriginal)
+    .digest("hex");
+
+  sql(`
+    INSERT INTO admincond.sesiones (
+      id,
+      usuario_id,
+      refresh_hash,
+      expira_en
+    )
+    VALUES (
+      '${sessionId}',
+      ${ids.resident},
+      '${hashOriginal}',
+      NOW() + INTERVAL '1 hour'
+    );
+  `);
+
+  const origin = env.FRONTEND_URL || "http://localhost:5173";
+
+  async function renovar(cookie) {
+    return fetch(`${url}/api/auth/refresh`, {
+      method: "POST",
+      headers: {
+        Origin: origin,
+        Cookie: `admincond_refresh=${cookie}`,
+      },
+    });
+  }
+
+  try {
+    // 1. El refresh token original funciona.
+    const primera = await renovar(refreshOriginal);
+
+    assert.equal(primera.status, 200);
+
+    const primeraRespuesta = await primera.json();
+
+    assert.equal(typeof primeraRespuesta.accessToken, "string");
+    assert.equal(primeraRespuesta.expiresIn, 900);
+
+    // El refresh token nunca debe aparecer en JSON.
+    assert.equal(
+      Object.hasOwn(primeraRespuesta, "refreshToken"),
+      false
+    );
+
+    // Obtener la nueva cookie emitida por el backend.
+    const setCookie = primera.headers.get("set-cookie");
+
+    assert.ok(setCookie);
+
+    assert.match(setCookie, /httponly/i);
+
+    const nuevaCookie = setCookie.match(
+      /admincond_refresh=([^;]+)/
+    )?.[1];
+
+    assert.ok(nuevaCookie);
+    assert.notEqual(nuevaCookie, refreshOriginal);
+
+    // 2. Reutilizar el token anterior debe fallar.
+    const reutilizacion = await renovar(refreshOriginal);
+
+    assert.equal(reutilizacion.status, 401);
+
+    // 3. El token nuevo sí debe permitir otra renovación.
+    const segunda = await renovar(nuevaCookie);
+
+    assert.equal(segunda.status, 200);
+
+    const segundaRespuesta = await segunda.json();
+
+    assert.equal(
+      typeof segundaRespuesta.accessToken,
+      "string"
+    );
+
+    // 4. PostgreSQL ya no debe conservar
+    // el hash del token original.
+    const tokenAntiguoPersistido = sql(`
+      SELECT COUNT(*)
+      FROM admincond.sesiones
+      WHERE id = '${sessionId}'
+        AND refresh_hash = '${hashOriginal}';
+    `);
+
+    assert.equal(tokenAntiguoPersistido, "0");
+
+    // La sesión continúa activa.
+    const estadoSesion = sql(`
+      SELECT revocada_en IS NULL
+      FROM admincond.sesiones
+      WHERE id = '${sessionId}';
+    `);
+
+    assert.equal(estadoSesion, "t");
+  } finally {
+    // Limpiar exclusivamente nuestra sesión temporal.
+    sql(`
+      DELETE FROM admincond.sesiones
+      WHERE id = '${sessionId}'
+        AND usuario_id = ${ids.resident};
+    `);
+  }
+});
