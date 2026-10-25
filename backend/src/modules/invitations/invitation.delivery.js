@@ -16,7 +16,8 @@ export async function claimInvitationDelivery(
 ) {
   const result = await query(
     `UPDATE admincond.invitaciones
-     SET estado_entrega = 'enviando'
+     SET estado_entrega = 'enviando',
+        inicio_envio_en = NOW()
      WHERE id = $1
        AND estado = 'pendiente'
        AND expira_en > NOW()
@@ -75,4 +76,97 @@ export async function recordInvitationDelivery(
   }
 
   return result.rows[0];
+}
+
+/**
+ * Diagnóstico de entregas y recuperaciones
+ * posiblemente interrumpidas.
+ *
+ * Requiere membresía administrativa activa.
+ * No modifica estados, no recupera tokens
+ * ni realiza envíos automáticos.
+ */
+export async function findPossiblyInterruptedDeliveries(
+  userId,
+  { query = pool.query.bind(pool) } = {}
+) {
+  const result = await query(
+    `SELECT
+       i.id,
+       s.condominio_id,
+       i.estado_entrega,
+       i.inicio_envio_en,
+       i.recuperacion_iniciada_en,
+       CASE
+         WHEN i.estado_entrega = 'enviando'
+           THEN 'envio_incierto'
+         ELSE 'recuperacion_pendiente'
+       END AS tipo_incidencia
+     FROM admincond.invitaciones i
+     JOIN admincond.solicitudes_residentes s
+       ON s.id = i.solicitud_id
+     JOIN admincond.unidades u
+       ON u.id = s.unidad_id
+      AND u.condominio_id = s.condominio_id
+     JOIN admincond.condominios co
+       ON co.id = s.condominio_id
+     JOIN admincond.clientes c
+       ON c.id = co.cliente_id
+     WHERE i.estado = 'pendiente'
+       AND s.estado = 'aprobada'
+       AND u.estado = 'activa'
+       AND co.estado = 'activo'
+       AND c.estado = 'activo'
+       AND (
+         (
+           i.estado_entrega = 'enviando'
+           AND (
+             (
+               i.inicio_envio_en IS NOT NULL
+               AND i.inicio_envio_en <=
+                 NOW() - INTERVAL '30 minutes'
+             )
+             OR
+             (
+               i.inicio_envio_en IS NULL
+               AND i.creada_en <=
+                 NOW() - INTERVAL '30 minutes'
+             )
+           )
+         )
+         OR
+         (
+           i.estado_entrega = 'pendiente'
+           AND i.recuperacion_iniciada_en IS NOT NULL
+           AND i.recuperacion_iniciada_en <=
+             NOW() - INTERVAL '30 minutes'
+         )
+       )
+       AND EXISTS (
+         SELECT 1
+         FROM admincond.membresias_condominio mco
+         JOIN admincond.membresias_cliente mc
+           ON mc.usuario_id = mco.usuario_id
+          AND mc.cliente_id = mco.cliente_id
+         JOIN admincond.usuarios usuario
+           ON usuario.id = mco.usuario_id
+         WHERE mco.usuario_id = $1
+           AND mco.condominio_id = co.id
+           AND mco.cliente_id = c.id
+           AND mco.rol = 'administrador'
+           AND mco.estado = 'activo'
+           AND mc.estado = 'activo'
+           AND usuario.estado = 'activo'
+       )
+     ORDER BY
+       COALESCE(
+         i.inicio_envio_en,
+         i.recuperacion_iniciada_en,
+         i.creada_en
+       ) ASC,
+       i.id ASC`,
+    [userId]
+  );
+
+  return result.rows;
 }
