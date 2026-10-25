@@ -21,11 +21,41 @@ import {
 
 import {
   reissueFailedInvitation,
+  recoverInterruptedInvitation,
 } from "./invitation.reissue.js";
+
+import {
+  findPossiblyInterruptedDeliveries,
+} from "./invitation.delivery.js";
 
 export const invitationRouter = Router();
 
 invitationRouter.use(requireAuth);
+
+/**
+ * GET /api/invitations/delivery/incidents
+ *
+ * Diagnóstico de entregas posiblemente interrumpidas.
+ * Solo muestra incidencias de condominios
+ * administrados por el usuario autenticado.
+ *
+ * No modifica estados ni reenvía correos.
+ */
+invitationRouter.get(
+  "/delivery/incidents",
+  async (req, res, next) => {
+    try {
+      const incidencias =
+        await findPossiblyInterruptedDeliveries(
+          req.user.id
+        );
+
+      return res.json({ incidencias });
+    } catch (error) {
+      next(error);
+    }
+  }
+);
 
 // El límite ampliado solo se aplica a la API aislada
 // de pruebas automatizadas, nunca a producción.
@@ -225,6 +255,84 @@ invitationRouter.post(
 
     return res.json({
       estado: "reemitida",
+      entrega: delivery.estadoEntrega,
+    });
+  })
+);
+
+/**
+ * POST /api/invitations/delivery/:id/recover
+ *
+ * Recuperación administrativa explícita.
+ *
+ * El correo anterior pudo haber sido aceptado por SMTP.
+ * Al recuperar, el token anterior pierde validez.
+ *
+ * No se permiten recuperaciones automáticas.
+ */
+invitationRouter.post(
+  "/delivery/:id/recover",
+  limiter,
+  asyncHandler(async (req, res) => {
+    const id = idSchema.safeParse(req.params.id);
+
+    const confirmation = z.object({
+      confirmarInvalidacionToken: z.literal(true),
+    }).safeParse(req.body);
+
+    if (!id.success || !confirmation.success) {
+      return res.status(400).json({
+        message: "Debe confirmar la invalidación del token anterior",
+      });
+    }
+
+    const isTestLab =
+      process.env.NODE_ENV === "test" &&
+      process.env.DB_NAME === "admincond_test" &&
+      process.env.ALLOW_DEV_INVITATION_TOKENS === "true";
+
+    // No modificar la invitación si no podemos
+    // realizar el nuevo intento de entrega.
+    if (!isTestLab) {
+      try {
+        assertInvitationMailConfigured();
+      } catch {
+        return res.status(503).json({
+          message: "Servicio de invitaciones no disponible",
+        });
+      }
+    }
+
+    const invitation = await recoverInterruptedInvitation(
+      req.user.id,
+      id.data
+    );
+
+    if (!invitation) {
+      return res.status(404).json({
+        message: "Invitación no disponible para recuperación",
+      });
+    }
+
+    // Únicamente en nuestro laboratorio TEST
+    // se devuelve el token para pruebas automatizadas.
+    if (isTestLab) {
+      return res.json({
+        estado: "recuperada",
+        invitacion: {
+          id: invitation.invitationId,
+          token: invitation.token,
+        },
+      });
+    }
+
+    // Producción: el token permanece en el backend
+    // y se utiliza exclusivamente para intentar
+    // entregar la nueva invitación por correo.
+    const delivery = await dispatchInvitation(invitation);
+
+    return res.json({
+      estado: "recuperada",
       entrega: delivery.estadoEntrega,
     });
   })

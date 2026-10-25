@@ -11,10 +11,12 @@ import { Client } from "pg";
 import {
   claimInvitationDelivery,
   recordInvitationDelivery,
+  findPossiblyInterruptedDeliveries,
 } from "../src/modules/invitations/invitation.delivery.js";
 
 import {
   reissueFailedInvitation,
+  recoverInterruptedInvitation,
 } from "../src/modules/invitations/invitation.reissue.js";
 
 const root = fileURLToPath(new URL("../../", import.meta.url));
@@ -66,6 +68,26 @@ function sql(query) {
     ],
     { cwd: root, encoding: "utf8", timeout: 20000 }
   ).trim();
+}
+
+async function withTestQuery(operation) {
+  const client = new Client({
+    host: "127.0.0.1",
+    port: 5434,
+    database: "admincond_test",
+    user: "admincond_test_api",
+    password: env.DB_PASSWORD,
+  });
+
+  try {
+    await client.connect();
+
+    return await operation(
+      client.query.bind(client)
+    );
+  } finally {
+    await client.end();
+  }
 }
 
 function signToken(userId, sessionId) {
@@ -3219,5 +3241,1845 @@ test("D33-03: renovar sesión invalida el refresh token anterior", async () => {
       WHERE id = '${sessionId}'
         AND usuario_id = ${ids.resident};
     `);
+  }
+});
+
+test("D34-01: invitación enviando no se reemite directamente", async () => {
+  const token = randomBytes(32).toString("base64url");
+
+  const tokenHash = createHash("sha256")
+    .update(token)
+    .digest("hex");
+
+  // Crear una invitación cuyo proceso de entrega
+  // quedó interrumpido en el estado 'enviando'.
+  const invitationId = sql(`
+    WITH solicitud AS (
+      INSERT INTO admincond.solicitudes_residentes (
+        unidad_id,
+        condominio_id,
+        solicitado_por,
+        correo_invitado,
+        estado,
+        revisado_por,
+        revisada_en
+      )
+      SELECT
+        u.id,
+        u.condominio_id,
+        ${ids.resident},
+        '${emails.approval}',
+        'aprobada',
+        ${ids.admin},
+        NOW()
+      FROM admincond.unidades u
+      WHERE u.codigo = 'UNIT-A-${marker}'
+        AND u.condominio_id = ${ids.condo}
+      RETURNING id
+    )
+    INSERT INTO admincond.invitaciones (
+      solicitud_id,
+      token_hash,
+      correo_destino,
+      expira_en,
+      estado_entrega
+    )
+    SELECT
+      id,
+      '${tokenHash}',
+      '${emails.approval}',
+      NOW() + INTERVAL '48 hours',
+      'enviando'
+    FROM solicitud
+    RETURNING id;
+  `);
+
+  assert.match(invitationId, /^\d+$/);
+
+  // 1. El administrador intenta reemitir la invitación.
+  const response = await send(
+    `/api/invitations/${invitationId}/reissue`,
+    "admin",
+    { method: "POST" }
+  );
+
+  // El mecanismo actual solamente acepta 'fallido'.
+  assert.equal(response.status, 404);
+
+  // 2. Comprobar que el estado no cambió.
+  const stored = sql(`
+    SELECT
+      estado_entrega,
+      token_hash,
+      intentos_entrega
+    FROM admincond.invitaciones
+    WHERE id = ${invitationId};
+  `).split("|");
+
+  assert.deepEqual(stored, [
+    "enviando",
+    tokenHash,
+    "0",
+  ]);
+
+  // 3. Tampoco debe poder reclamar un nuevo envío.
+  const claimed = await withTestQuery((query) =>
+    claimInvitationDelivery(
+      Number(invitationId),
+      { query }
+    )
+  );
+
+  assert.equal(claimed, null);
+
+  // La limpieza global de los fixtures TEST
+  // eliminará esta invitación al terminar la suite.
+});
+
+test("D34-02: reclamar invitación registra inicio de envío", async () => {
+  const tokenHash = createHash("sha256")
+    .update(randomBytes(32))
+    .digest("hex");
+
+  const invitationId = sql(`
+    WITH solicitud AS (
+      INSERT INTO admincond.solicitudes_residentes (
+        unidad_id,
+        condominio_id,
+        solicitado_por,
+        correo_invitado,
+        estado,
+        revisado_por,
+        revisada_en
+      )
+      SELECT
+        u.id,
+        u.condominio_id,
+        ${ids.resident},
+        '${emails.approval}',
+        'aprobada',
+        ${ids.admin},
+        NOW()
+      FROM admincond.unidades u
+      WHERE u.codigo = 'UNIT-A-${marker}'
+        AND u.condominio_id = ${ids.condo}
+      RETURNING id
+    )
+    INSERT INTO admincond.invitaciones (
+      solicitud_id,
+      token_hash,
+      correo_destino,
+      expira_en
+    )
+    SELECT
+      id,
+      '${tokenHash}',
+      '${emails.approval}',
+      NOW() + INTERVAL '48 hours'
+    FROM solicitud
+    RETURNING id;
+  `);
+
+  assert.match(invitationId, /^\d+$/);
+
+  // 1. La invitación todavía no tiene inicio de envío.
+  const antes = sql(`
+    SELECT
+      estado_entrega,
+      inicio_envio_en IS NULL
+    FROM admincond.invitaciones
+    WHERE id = ${invitationId};
+  `).split("|");
+
+  assert.deepEqual(antes, ["pendiente", "t"]);
+
+  // 2. Reclamar la invitación usando exclusivamente TEST.
+  const claimed = await withTestQuery((query) =>
+    claimInvitationDelivery(
+      Number(invitationId),
+      { query }
+    )
+  );
+
+  assert.ok(claimed);
+  assert.equal(claimed.estado_entrega, "enviando");
+
+  // 3. Confirmar que PostgreSQL registró el inicio.
+  const despues = sql(`
+    SELECT
+      estado_entrega,
+      inicio_envio_en IS NOT NULL,
+      inicio_envio_en <= NOW(),
+      ultimo_intento_en IS NULL
+    FROM admincond.invitaciones
+    WHERE id = ${invitationId};
+  `).split("|");
+
+  assert.deepEqual(despues, [
+    "enviando",
+    "t",
+    "t",
+    "t",
+  ]);
+
+  // 4. No debe ser posible reclamar dos veces.
+  const secondClaim = await withTestQuery((query) =>
+    claimInvitationDelivery(
+      Number(invitationId),
+      { query }
+    )
+  );
+
+  assert.equal(secondClaim, null);
+
+  // 5. Registrar el intento como fallido usando TEST.
+  const recorded = await withTestQuery((query) =>
+    recordInvitationDelivery(
+      Number(invitationId),
+      false,
+      { query }
+    )
+  );
+
+  assert.equal(recorded.estado_entrega, "fallido");
+
+  // 6. El comienzo y el resultado quedan registrados.
+  const finalState = sql(`
+    SELECT
+      estado_entrega,
+      inicio_envio_en IS NOT NULL,
+      ultimo_intento_en IS NOT NULL,
+      enviado_en IS NULL
+    FROM admincond.invitaciones
+    WHERE id = ${invitationId};
+  `).split("|");
+
+  assert.deepEqual(finalState, [
+    "fallido",
+    "t",
+    "t",
+    "t",
+  ]);
+});
+
+test("D34-03: detectar entregas antiguas sin reenviarlas", async () => {
+  const invitationIds = [];
+
+  function createInvitation({
+    estadoEntrega,
+    inicioEnvio,
+  }) {
+    const hash = createHash("sha256")
+      .update(randomBytes(32))
+      .digest("hex");
+
+    const id = sql(`
+      WITH solicitud AS (
+        INSERT INTO admincond.solicitudes_residentes (
+          unidad_id,
+          condominio_id,
+          solicitado_por,
+          correo_invitado,
+          estado,
+          revisado_por,
+          revisada_en
+        )
+        SELECT
+          u.id,
+          u.condominio_id,
+          ${ids.resident},
+          '${emails.approval}',
+          'aprobada',
+          ${ids.admin},
+          NOW()
+        FROM admincond.unidades u
+        WHERE u.codigo = 'UNIT-A-${marker}'
+          AND u.condominio_id = ${ids.condo}
+        RETURNING id
+      )
+      INSERT INTO admincond.invitaciones (
+        solicitud_id,
+        token_hash,
+        correo_destino,
+        expira_en,
+        estado_entrega,
+        inicio_envio_en
+      )
+      SELECT
+        id,
+        '${hash}',
+        '${emails.approval}',
+        NOW() + INTERVAL '48 hours',
+        '${estadoEntrega}',
+        ${inicioEnvio}
+      FROM solicitud
+      RETURNING id;
+    `);
+
+    assert.match(id, /^\d+$/);
+    invitationIds.push(Number(id));
+
+    return Number(id);
+  }
+
+  // Crear tres invitaciones independientes:
+  // una antigua, una reciente y una pendiente.
+  const antigua = createInvitation({
+    estadoEntrega: "enviando",
+    inicioEnvio: "NOW() - INTERVAL '40 minutes'",
+  });
+
+  const reciente = createInvitation({
+    estadoEntrega: "enviando",
+    inicioEnvio: "NOW()",
+  });
+
+  const pendiente = createInvitation({
+    estadoEntrega: "pendiente",
+    inicioEnvio: "NULL",
+  });
+
+  // Consultar exclusivamente PostgreSQL TEST.
+  const detected = await withTestQuery((query) =>
+    findPossiblyInterruptedDeliveries(
+      ids.admin,
+      { query }
+    )
+  );
+
+  const detectedIds = detected.map((item) =>
+    Number(item.id)
+  );
+
+  // Solamente la invitación antigua debe detectarse
+  // entre los tres registros creados.
+  assert.equal(detectedIds.includes(antigua), true);
+  assert.equal(detectedIds.includes(reciente), false);
+  assert.equal(detectedIds.includes(pendiente), false);
+
+  // Un residente sin rol administrativo no puede
+  // consultar estas incidencias.
+  const residentResults = await withTestQuery((query) =>
+    findPossiblyInterruptedDeliveries(
+      ids.resident,
+      { query }
+    )
+  );
+
+  assert.equal(
+    residentResults.some(
+      (item) => Number(item.id) === antigua
+    ),
+    false
+  );
+
+  // Un usuario externo tampoco puede acceder.
+  const outsiderResults = await withTestQuery((query) =>
+    findPossiblyInterruptedDeliveries(
+      ids.outsider,
+      { query }
+    )
+  );
+
+  assert.equal(
+    outsiderResults.some(
+      (item) => Number(item.id) === antigua
+    ),
+    false
+  );
+
+
+  // La detección no debe modificar ningún estado.
+  const states = sql(`
+    SELECT id, estado_entrega
+    FROM admincond.invitaciones
+    WHERE id IN (${invitationIds.join(",")})
+    ORDER BY id;
+  `).split("\n");
+
+  assert.equal(states.length, 3);
+
+  const stored = new Map(
+    states.map((line) => {
+      const [id, state] = line.split("|");
+      return [Number(id), state];
+    })
+  );
+
+  assert.equal(stored.get(antigua), "enviando");
+  assert.equal(stored.get(reciente), "enviando");
+  assert.equal(stored.get(pendiente), "pendiente");
+
+  // Los fixtures son eliminados por la limpieza
+  // global de la suite de autorización.
+});
+
+test("D34-04: API de incidencias respeta los permisos administrativos", async () => {
+  const tokenHash = createHash("sha256")
+    .update(randomBytes(32))
+    .digest("hex");
+
+  // Crear una entrega interrumpida en el condominio
+  // administrado por nuestro usuario de prueba.
+  const invitationId = sql(`
+    WITH solicitud AS (
+      INSERT INTO admincond.solicitudes_residentes (
+        unidad_id,
+        condominio_id,
+        solicitado_por,
+        correo_invitado,
+        estado,
+        revisado_por,
+        revisada_en
+      )
+      SELECT
+        u.id,
+        u.condominio_id,
+        ${ids.resident},
+        '${emails.approval}',
+        'aprobada',
+        ${ids.admin},
+        NOW()
+      FROM admincond.unidades u
+      WHERE u.codigo = 'UNIT-A-${marker}'
+        AND u.condominio_id = ${ids.condo}
+      RETURNING id
+    )
+    INSERT INTO admincond.invitaciones (
+      solicitud_id,
+      token_hash,
+      correo_destino,
+      expira_en,
+      estado_entrega,
+      inicio_envio_en
+    )
+    SELECT
+      id,
+      '${tokenHash}',
+      '${emails.approval}',
+      NOW() + INTERVAL '48 hours',
+      'enviando',
+      NOW() - INTERVAL '40 minutes'
+    FROM solicitud
+    RETURNING id;
+  `);
+
+  assert.match(invitationId, /^\d+$/);
+
+  const endpoint = "/api/invitations/delivery/incidents";
+
+  // 1. El administrador autorizado puede consultar.
+  const adminResponse = await send(
+    endpoint,
+    "admin"
+  );
+
+  const adminBody = await adminResponse.json();
+
+  assert.equal(
+    adminResponse.status,
+    200,
+    JSON.stringify(adminBody)
+  );
+
+  assert.ok(Array.isArray(adminBody.incidencias));
+
+  const incidencia = adminBody.incidencias.find(
+    (item) => String(item.id) === invitationId
+  );
+
+  assert.ok(incidencia);
+
+  assert.equal(
+    String(incidencia.condominio_id),
+    String(ids.condo)
+  );
+
+  assert.equal(
+    incidencia.estado_entrega,
+    "enviando"
+  );
+
+  // 2. La API no expone tokens ni sus hashes.
+  assert.equal(incidencia.token, undefined);
+  assert.equal(incidencia.token_hash, undefined);
+  assert.equal(
+    JSON.stringify(adminBody).includes(tokenHash),
+    false
+  );
+
+  // 3. Un residente no puede ver la incidencia.
+  const residentResponse = await send(
+    endpoint,
+    "resident"
+  );
+
+  const residentBody = await residentResponse.json();
+
+  assert.equal(
+    residentResponse.status,
+    200,
+    JSON.stringify(residentBody)
+  );
+
+  assert.ok(Array.isArray(residentBody.incidencias));
+
+  assert.equal(
+    residentBody.incidencias.some(
+      (item) => String(item.id) === invitationId
+    ),
+    false
+  );
+
+  // 4. Un usuario externo tampoco puede verla.
+  const outsiderResponse = await send(
+    endpoint,
+    "outsider"
+  );
+
+  const outsiderBody = await outsiderResponse.json();
+
+  assert.equal(
+    outsiderResponse.status,
+    200,
+    JSON.stringify(outsiderBody)
+  );
+
+  assert.ok(Array.isArray(outsiderBody.incidencias));
+
+  assert.equal(
+    outsiderBody.incidencias.some(
+      (item) => String(item.id) === invitationId
+    ),
+    false
+  );
+
+  // 5. La consulta no modifica el estado.
+  const storedState = sql(`
+    SELECT estado_entrega
+    FROM admincond.invitaciones
+    WHERE id = ${invitationId};
+  `);
+
+  assert.equal(storedState, "enviando");
+});
+
+test("D34-05: detectar entrega antigua sin fecha de inicio", async () => {
+  const tokenHash = createHash("sha256")
+    .update(randomBytes(32))
+    .digest("hex");
+
+  // Simula una invitación creada antes de la migración 011.
+  const invitationId = sql(`
+    WITH solicitud AS (
+      INSERT INTO admincond.solicitudes_residentes (
+        unidad_id,
+        condominio_id,
+        solicitado_por,
+        correo_invitado,
+        estado,
+        revisado_por,
+        revisada_en
+      )
+      SELECT
+        u.id,
+        u.condominio_id,
+        ${ids.resident},
+        '${emails.approval}',
+        'aprobada',
+        ${ids.admin},
+        NOW()
+      FROM admincond.unidades u
+      WHERE u.codigo = 'UNIT-A-${marker}'
+        AND u.condominio_id = ${ids.condo}
+      RETURNING id
+    )
+    INSERT INTO admincond.invitaciones (
+      solicitud_id,
+      token_hash,
+      correo_destino,
+      creada_en,
+      expira_en,
+      estado_entrega,
+      inicio_envio_en
+    )
+    SELECT
+      id,
+      '${tokenHash}',
+      '${emails.approval}',
+      NOW() - INTERVAL '40 minutes',
+      NOW() + INTERVAL '48 hours',
+      'enviando',
+      NULL
+    FROM solicitud
+    RETURNING id;
+  `);
+
+  assert.match(invitationId, /^\d+$/);
+
+  // 1. El administrador autorizado ve la incidencia.
+  const response = await send(
+    "/api/invitations/delivery/incidents",
+    "admin"
+  );
+
+  const body = await response.json();
+
+  assert.equal(response.status, 200, JSON.stringify(body));
+
+  assert.ok(
+    body.incidencias.some(
+      (item) => String(item.id) === invitationId
+    )
+  );
+
+  // 2. El residente no puede consultar esa incidencia.
+  const residentResponse = await send(
+    "/api/invitations/delivery/incidents",
+    "resident"
+  );
+
+  const residentBody = await residentResponse.json();
+
+  assert.equal(residentResponse.status, 200);
+
+  assert.equal(
+    residentBody.incidencias.some(
+      (item) => String(item.id) === invitationId
+    ),
+    false
+  );
+
+  // 3. La detección no cambia estados ni tokens.
+  const stored = sql(`
+    SELECT
+      estado_entrega,
+      inicio_envio_en IS NULL,
+      token_hash
+    FROM admincond.invitaciones
+    WHERE id = ${invitationId};
+  `).split("|");
+
+  assert.deepEqual(stored, [
+    "enviando",
+    "t",
+    tokenHash,
+  ]);
+});
+
+test("D34-06: recuperación interrumpida exige antigüedad y administrador", async () => {
+  const oldToken = randomBytes(32).toString("base64url");
+  const oldHash = createHash("sha256")
+    .update(oldToken)
+    .digest("hex");
+
+  const invitationId = sql(`
+    WITH solicitud AS (
+      INSERT INTO admincond.solicitudes_residentes (
+        unidad_id,
+        condominio_id,
+        solicitado_por,
+        correo_invitado,
+        estado,
+        revisado_por,
+        revisada_en
+      )
+      SELECT
+        u.id,
+        u.condominio_id,
+        ${ids.resident},
+        '${emails.approval}',
+        'aprobada',
+        ${ids.admin},
+        NOW()
+      FROM admincond.unidades u
+      WHERE u.codigo = 'UNIT-A-${marker}'
+        AND u.condominio_id = ${ids.condo}
+      RETURNING id
+    )
+    INSERT INTO admincond.invitaciones (
+      solicitud_id,
+      token_hash,
+      correo_destino,
+      expira_en,
+      estado_entrega,
+      inicio_envio_en
+    )
+    SELECT
+      id,
+      '${oldHash}',
+      '${emails.approval}',
+      NOW() + INTERVAL '48 hours',
+      'enviando',
+      NOW()
+    FROM solicitud
+    RETURNING id;
+  `);
+
+  assert.match(invitationId, /^\d+$/);
+
+  // 1. Un envío reciente no puede recuperarse.
+  const recent = await withTestQuery((query) =>
+    recoverInterruptedInvitation(
+      ids.admin,
+      Number(invitationId),
+      { query }
+    )
+  );
+
+  assert.equal(recent, null);
+
+  // Simular que pasaron 40 minutos.
+  sql(`
+    UPDATE admincond.invitaciones
+    SET inicio_envio_en =
+      NOW() - INTERVAL '40 minutes'
+    WHERE id = ${invitationId};
+  `);
+
+  // 2. Un usuario externo no puede recuperar.
+  const unauthorized = await withTestQuery((query) =>
+    recoverInterruptedInvitation(
+      ids.outsider,
+      Number(invitationId),
+      { query }
+    )
+  );
+
+  assert.equal(unauthorized, null);
+
+  // 3. Un administrador autorizado sí puede recuperar.
+  const recovered = await withTestQuery((query) =>
+    recoverInterruptedInvitation(
+      ids.admin,
+      Number(invitationId),
+      { query }
+    )
+  );
+
+  assert.ok(recovered);
+  assert.equal(
+    String(recovered.invitationId),
+    invitationId
+  );
+  assert.equal(recovered.to, emails.approval);
+
+  // 4. El nuevo token debe ser distinto.
+  assert.equal(typeof recovered.token, "string");
+  assert.notEqual(recovered.token, oldToken);
+
+  const newHash = createHash("sha256")
+    .update(recovered.token)
+    .digest("hex");
+
+  assert.notEqual(newHash, oldHash);
+
+  // 5. Comprobar que PostgreSQL guardó
+  // el token nuevo y restableció la entrega.
+  const stored = sql(`
+    SELECT
+      token_hash,
+      estado_entrega,
+      inicio_envio_en IS NULL,
+      enviado_en IS NULL
+    FROM admincond.invitaciones
+    WHERE id = ${invitationId};
+  `).split("|");
+
+  assert.deepEqual(stored, [
+    newHash,
+    "pendiente",
+    "t",
+    "t",
+  ]);
+
+  // 6. El token anterior deja de ser válido.
+  const oldTokenResponse = await send(
+    "/api/invitations/accept",
+    "approval",
+    {
+      method: "POST",
+      body: JSON.stringify({ token: oldToken }),
+    }
+  );
+
+  assert.equal(oldTokenResponse.status, 400);
+
+  // 7. No se puede recuperar dos veces.
+  const repeated = await withTestQuery((query) =>
+    recoverInterruptedInvitation(
+      ids.admin,
+      Number(invitationId),
+      { query }
+    )
+  );
+
+  assert.equal(repeated, null);
+});
+
+test("D34-07: recuperación HTTP exige confirmación y permisos", async () => {
+  const oldToken = randomBytes(32).toString("base64url");
+
+  const oldHash = createHash("sha256")
+    .update(oldToken)
+    .digest("hex");
+
+  const invitationId = sql(`
+    WITH solicitud AS (
+      INSERT INTO admincond.solicitudes_residentes (
+        unidad_id,
+        condominio_id,
+        solicitado_por,
+        correo_invitado,
+        estado,
+        revisado_por,
+        revisada_en
+      )
+      SELECT
+        u.id,
+        u.condominio_id,
+        ${ids.resident},
+        '${emails.approval}',
+        'aprobada',
+        ${ids.admin},
+        NOW()
+      FROM admincond.unidades u
+      WHERE u.codigo = 'UNIT-A-${marker}'
+        AND u.condominio_id = ${ids.condo}
+      RETURNING id
+    )
+    INSERT INTO admincond.invitaciones (
+      solicitud_id,
+      token_hash,
+      correo_destino,
+      expira_en,
+      estado_entrega,
+      inicio_envio_en
+    )
+    SELECT
+      id,
+      '${oldHash}',
+      '${emails.approval}',
+      NOW() + INTERVAL '48 hours',
+      'enviando',
+      NOW() - INTERVAL '40 minutes'
+    FROM solicitud
+    RETURNING id;
+  `);
+
+  assert.match(invitationId, /^\d+$/);
+
+  const endpoint =
+    `/api/invitations/delivery/${invitationId}/recover`;
+
+  // 1. Sin confirmación explícita, debe rechazar.
+  const withoutConfirmation = await send(
+    endpoint,
+    "admin",
+    {
+      method: "POST",
+      body: JSON.stringify({}),
+    }
+  );
+
+  assert.equal(withoutConfirmation.status, 400);
+
+  // 2. Usuario externo no puede recuperar.
+  const denied = await send(
+    endpoint,
+    "outsider",
+    {
+      method: "POST",
+      body: JSON.stringify({
+        confirmarInvalidacionToken: true,
+      }),
+    }
+  );
+
+  assert.equal(denied.status, 404);
+
+  // 3. Administrador autorizado confirma la operación.
+  const approved = await send(
+    endpoint,
+    "admin",
+    {
+      method: "POST",
+      body: JSON.stringify({
+        confirmarInvalidacionToken: true,
+      }),
+    }
+  );
+
+  const body = await approved.json();
+
+  assert.equal(
+    approved.status,
+    200,
+    JSON.stringify(body)
+  );
+
+  assert.equal(body.estado, "recuperada");
+
+  // API TEST: puede devolver el token
+  // únicamente para las pruebas de laboratorio.
+  const newToken = body.invitacion?.token;
+
+  assert.equal(typeof newToken, "string");
+  assert.notEqual(newToken, oldToken);
+
+  const newHash = createHash("sha256")
+    .update(newToken)
+    .digest("hex");
+
+  // 4. Verificar la persistencia en PostgreSQL.
+  const stored = sql(`
+    SELECT
+      token_hash,
+      estado_entrega,
+      inicio_envio_en IS NULL
+    FROM admincond.invitaciones
+    WHERE id = ${invitationId};
+  `).split("|");
+
+  assert.deepEqual(stored, [
+    newHash,
+    "pendiente",
+    "t",
+  ]);
+
+  // 5. La misma operación no puede repetirse.
+  const repeated = await send(
+    endpoint,
+    "admin",
+    {
+      method: "POST",
+      body: JSON.stringify({
+        confirmarInvalidacionToken: true,
+      }),
+    }
+  );
+
+  assert.equal(repeated.status, 404);
+});
+
+test("D34-08: sin SMTP no se recupera ni rota el token", async () => {
+  const oldToken = randomBytes(32).toString("base64url");
+
+  const oldHash = createHash("sha256")
+    .update(oldToken)
+    .digest("hex");
+
+  // Crear una entrega interrumpida antigua
+  // exclusivamente en admincond_test.
+  const invitationId = sql(`
+    WITH solicitud AS (
+      INSERT INTO admincond.solicitudes_residentes (
+        unidad_id,
+        condominio_id,
+        solicitado_por,
+        correo_invitado,
+        estado,
+        revisado_por,
+        revisada_en
+      )
+      SELECT
+        u.id,
+        u.condominio_id,
+        ${ids.resident},
+        '${emails.approval}',
+        'aprobada',
+        ${ids.admin},
+        NOW()
+      FROM admincond.unidades u
+      WHERE u.codigo = 'UNIT-A-${marker}'
+        AND u.condominio_id = ${ids.condo}
+      RETURNING id
+    )
+    INSERT INTO admincond.invitaciones (
+      solicitud_id,
+      token_hash,
+      correo_destino,
+      expira_en,
+      estado_entrega,
+      inicio_envio_en
+    )
+    SELECT
+      id,
+      '${oldHash}',
+      '${emails.approval}',
+      NOW() + INTERVAL '48 hours',
+      'enviando',
+      NOW() - INTERVAL '40 minutes'
+    FROM solicitud
+    RETURNING id;
+  `);
+
+  assert.match(invitationId, /^\d+$/);
+
+  // API de TEST sin servicio de correo.
+  const noMailUrl = "http://127.0.0.1:3002";
+
+  // Verificar que la API alternativa está disponible.
+  const health = await fetch(
+    `${noMailUrl}/api/health`
+  );
+
+  assert.equal(health.status, 200);
+
+  // Intentar recuperar desde la API sin SMTP.
+  const response = await fetch(
+    `${noMailUrl}/api/invitations/delivery/${invitationId}/recover`,
+    {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${tokens.admin}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        confirmarInvalidacionToken: true,
+      }),
+    }
+  );
+
+  const body = await response.json();
+
+  // Debe rechazar porque el correo no está configurado.
+  assert.equal(
+    response.status,
+    503,
+    JSON.stringify(body)
+  );
+
+  assert.equal(
+    body.message,
+    "Servicio de invitaciones no disponible"
+  );
+
+  // No debe exponer ningún token.
+  assert.equal(body.invitacion, undefined);
+  assert.equal(body.token, undefined);
+
+  // Verificar que la base no haya cambiado.
+  const stored = sql(`
+    SELECT
+      token_hash,
+      estado_entrega,
+      inicio_envio_en IS NOT NULL,
+      intentos_entrega
+    FROM admincond.invitaciones
+    WHERE id = ${invitationId};
+  `).split("|");
+
+  assert.deepEqual(stored, [
+    oldHash,
+    "enviando",
+    "t",
+    "0",
+  ]);
+});
+
+test("D34-09: recuperación con transporte simulado no expone tokens", async () => {
+  const oldToken = randomBytes(32).toString("base64url");
+
+  const oldHash = createHash("sha256")
+    .update(oldToken)
+    .digest("hex");
+
+  const invitationId = sql(`
+    WITH solicitud AS (
+      INSERT INTO admincond.solicitudes_residentes (
+        unidad_id,
+        condominio_id,
+        solicitado_por,
+        correo_invitado,
+        estado,
+        revisado_por,
+        revisada_en
+      )
+      SELECT
+        u.id,
+        u.condominio_id,
+        ${ids.resident},
+        '${emails.approval}',
+        'aprobada',
+        ${ids.admin},
+        NOW()
+      FROM admincond.unidades u
+      WHERE u.codigo = 'UNIT-A-${marker}'
+        AND u.condominio_id = ${ids.condo}
+      RETURNING id
+    )
+    INSERT INTO admincond.invitaciones (
+      solicitud_id,
+      token_hash,
+      correo_destino,
+      expira_en,
+      estado_entrega,
+      inicio_envio_en
+    )
+    SELECT
+      id,
+      '${oldHash}',
+      '${emails.approval}',
+      NOW() + INTERVAL '48 hours',
+      'enviando',
+      NOW() - INTERVAL '40 minutes'
+    FROM solicitud
+    RETURNING id;
+  `);
+
+  assert.match(invitationId, /^\d+$/);
+
+  const mailApiUrl = "http://127.0.0.1:3003";
+
+  // 1. Comprobar la disponibilidad de la API.
+  const health = await fetch(
+    `${mailApiUrl}/api/health`
+  );
+
+  assert.equal(health.status, 200);
+
+  // 2. Recuperar con confirmación administrativa.
+  const response = await fetch(
+    `${mailApiUrl}/api/invitations/delivery/${invitationId}/recover`,
+    {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${tokens.admin}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        confirmarInvalidacionToken: true,
+      }),
+    }
+  );
+
+  const body = await response.json();
+
+  assert.equal(
+    response.status,
+    200,
+    JSON.stringify(body)
+  );
+
+  assert.equal(body.estado, "recuperada");
+
+  // En este entorno, "enviado" significa que
+  // jsonTransport procesó el mensaje simulado.
+  assert.equal(body.entrega, "enviado");
+
+  // 3. No exponer tokens en la respuesta HTTP.
+  assert.equal(body.token, undefined);
+  assert.equal(body.invitacion, undefined);
+
+  const responseText = JSON.stringify(body);
+
+  assert.equal(responseText.includes(oldToken), false);
+  assert.equal(responseText.includes(oldHash), false);
+
+  // 4. PostgreSQL registra la nueva entrega.
+  const stored = sql(`
+    SELECT
+      token_hash <> '${oldHash}',
+      estado_entrega,
+      intentos_entrega,
+      inicio_envio_en IS NOT NULL,
+      ultimo_intento_en IS NOT NULL,
+      enviado_en IS NOT NULL
+    FROM admincond.invitaciones
+    WHERE id = ${invitationId};
+  `).split("|");
+
+  assert.deepEqual(stored, [
+    "t",
+    "enviado",
+    "1",
+    "t",
+    "t",
+    "t",
+  ]);
+
+  // 5. El token original ya no puede aceptarse.
+  const oldTokenResponse = await send(
+    "/api/invitations/accept",
+    "approval",
+    {
+      method: "POST",
+      body: JSON.stringify({
+        token: oldToken,
+      }),
+    }
+  );
+
+  assert.equal(oldTokenResponse.status, 400);
+
+  // 6. La invitación ya recuperada no puede
+  // recuperarse nuevamente.
+  const repeated = await fetch(
+    `${mailApiUrl}/api/invitations/delivery/${invitationId}/recover`,
+    {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${tokens.admin}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        confirmarInvalidacionToken: true,
+      }),
+    }
+  );
+
+  assert.equal(repeated.status, 404);
+});
+
+test("D34-10: detectar riesgo de interrupción después de recuperar", async () => {
+  const originalToken = randomBytes(32).toString("base64url");
+
+  const originalHash = createHash("sha256")
+    .update(originalToken)
+    .digest("hex");
+
+  const invitationId = sql(`
+    WITH solicitud AS (
+      INSERT INTO admincond.solicitudes_residentes (
+        unidad_id,
+        condominio_id,
+        solicitado_por,
+        correo_invitado,
+        estado,
+        revisado_por,
+        revisada_en
+      )
+      SELECT
+        u.id,
+        u.condominio_id,
+        ${ids.resident},
+        '${emails.approval}',
+        'aprobada',
+        ${ids.admin},
+        NOW()
+      FROM admincond.unidades u
+      WHERE u.codigo = 'UNIT-A-${marker}'
+        AND u.condominio_id = ${ids.condo}
+      RETURNING id
+    )
+    INSERT INTO admincond.invitaciones (
+      solicitud_id,
+      token_hash,
+      correo_destino,
+      expira_en,
+      estado_entrega,
+      inicio_envio_en
+    )
+    SELECT
+      id,
+      '${originalHash}',
+      '${emails.approval}',
+      NOW() + INTERVAL '48 hours',
+      'enviando',
+      NOW() - INTERVAL '40 minutes'
+    FROM solicitud
+    RETURNING id;
+  `);
+
+  assert.match(invitationId, /^\d+$/);
+
+  // 1. Recuperar la invitación mediante la función real,
+  // usando exclusivamente PostgreSQL TEST.
+  const recovered = await withTestQuery((query) =>
+    recoverInterruptedInvitation(
+      ids.admin,
+      Number(invitationId),
+      { query }
+    )
+  );
+
+  assert.ok(recovered);
+
+  // 2. Simular una interrupción:
+  // NO llamar a dispatchInvitation().
+  // El token nuevo queda únicamente en esta variable.
+
+  const recoveredHash = createHash("sha256")
+    .update(recovered.token)
+    .digest("hex");
+
+  // 3. Verificar el estado persistido.
+
+  const stored = sql(`
+    SELECT
+      estado_entrega,
+      token_hash,
+      inicio_envio_en IS NULL,
+      recuperacion_iniciada_en IS NOT NULL,
+      recuperacion_iniciada_en <= NOW()
+    FROM admincond.invitaciones
+    WHERE id = ${invitationId};
+  `).split("|");
+
+  assert.deepEqual(stored, [
+    "pendiente",
+    recoveredHash,
+    "t",
+    "t",
+    "t",
+  ]);
+
+  // 4. La recuperación existente no puede repetirse
+  // porque solo admite estado 'enviando'.
+  const secondRecovery = await withTestQuery((query) =>
+    recoverInterruptedInvitation(
+      ids.admin,
+      Number(invitationId),
+      { query }
+    )
+  );
+
+  assert.equal(secondRecovery, null);
+
+  // 5. El diagnóstico actual tampoco lo identifica.
+  const incidents = await withTestQuery((query) =>
+    findPossiblyInterruptedDeliveries(
+      ids.admin,
+      { query }
+    )
+  );
+
+  assert.equal(
+    incidents.some(
+      (item) => String(item.id) === invitationId
+    ),
+    false
+  );
+});
+
+test("D34-11: detectar recuperación pendiente sin exponerla a otros usuarios", async () => {
+  const tokenHash = createHash("sha256")
+    .update(randomBytes(32))
+    .digest("hex");
+
+  // Simular una recuperación que comenzó
+  // hace 40 minutos, sin llegar a enviar.
+  const invitationId = sql(`
+    WITH solicitud AS (
+      INSERT INTO admincond.solicitudes_residentes (
+        unidad_id,
+        condominio_id,
+        solicitado_por,
+        correo_invitado,
+        estado,
+        revisado_por,
+        revisada_en
+      )
+      SELECT
+        u.id,
+        u.condominio_id,
+        ${ids.resident},
+        '${emails.approval}',
+        'aprobada',
+        ${ids.admin},
+        NOW()
+      FROM admincond.unidades u
+      WHERE u.codigo = 'UNIT-A-${marker}'
+        AND u.condominio_id = ${ids.condo}
+      RETURNING id
+    )
+    INSERT INTO admincond.invitaciones (
+      solicitud_id,
+      token_hash,
+      correo_destino,
+      expira_en,
+      estado_entrega,
+      recuperacion_iniciada_en
+    )
+    SELECT
+      id,
+      '${tokenHash}',
+      '${emails.approval}',
+      NOW() + INTERVAL '48 hours',
+      'pendiente',
+      NOW() - INTERVAL '40 minutes'
+    FROM solicitud
+    RETURNING id;
+  `);
+
+  assert.match(invitationId, /^\d+$/);
+
+  const endpoint = "/api/invitations/delivery/incidents";
+
+  // 1. El administrador autorizado ve la incidencia.
+  const adminResponse = await send(endpoint, "admin");
+  const adminBody = await adminResponse.json();
+
+  assert.equal(
+    adminResponse.status,
+    200,
+    JSON.stringify(adminBody)
+  );
+
+  const incident = adminBody.incidencias.find(
+    (item) => String(item.id) === invitationId
+  );
+
+  assert.ok(incident);
+  assert.equal(
+    incident.tipo_incidencia,
+    "recuperacion_pendiente"
+  );
+
+  assert.equal(
+    String(incident.condominio_id),
+    String(ids.condo)
+  );
+
+  // 2. No se exponen tokens ni hashes.
+  assert.equal(incident.token, undefined);
+  assert.equal(incident.token_hash, undefined);
+
+  // 3. Un residente no puede ver la incidencia.
+  const residentResponse = await send(
+    endpoint,
+    "resident"
+  );
+
+  const residentBody = await residentResponse.json();
+
+  assert.equal(residentResponse.status, 200);
+  assert.equal(
+    residentBody.incidencias.some(
+      (item) => String(item.id) === invitationId
+    ),
+    false
+  );
+
+  // 4. Tampoco un usuario de otro cliente.
+  const outsiderResponse = await send(
+    endpoint,
+    "outsider"
+  );
+
+  const outsiderBody = await outsiderResponse.json();
+
+  assert.equal(outsiderResponse.status, 200);
+  assert.equal(
+    outsiderBody.incidencias.some(
+      (item) => String(item.id) === invitationId
+    ),
+    false
+  );
+
+  // 5. El diagnóstico no modifica la invitación.
+  const stored = sql(`
+    SELECT
+      estado_entrega,
+      token_hash,
+      inicio_envio_en IS NULL,
+      recuperacion_iniciada_en IS NOT NULL
+    FROM admincond.invitaciones
+    WHERE id = ${invitationId};
+  `).split("|");
+
+  assert.deepEqual(stored, [
+    "pendiente",
+    tokenHash,
+    "t",
+    "t",
+  ]);
+});
+
+test("D34-12: recuperación pendiente exige antigüedad, confirmación y permisos", async () => {
+  const oldToken = randomBytes(32).toString("base64url");
+
+  const oldHash = createHash("sha256")
+    .update(oldToken)
+    .digest("hex");
+
+  // Simula una recuperación iniciada hace 40 minutos
+  // cuyo envío nunca llegó a comenzar.
+  const invitationId = sql(`
+    WITH solicitud AS (
+      INSERT INTO admincond.solicitudes_residentes (
+        unidad_id,
+        condominio_id,
+        solicitado_por,
+        correo_invitado,
+        estado,
+        revisado_por,
+        revisada_en
+      )
+      SELECT
+        u.id,
+        u.condominio_id,
+        ${ids.resident},
+        '${emails.approval}',
+        'aprobada',
+        ${ids.admin},
+        NOW()
+      FROM admincond.unidades u
+      WHERE u.codigo = 'UNIT-A-${marker}'
+        AND u.condominio_id = ${ids.condo}
+      RETURNING id
+    )
+    INSERT INTO admincond.invitaciones (
+      solicitud_id,
+      token_hash,
+      correo_destino,
+      expira_en,
+      estado_entrega,
+      recuperacion_iniciada_en
+    )
+    SELECT
+      id,
+      '${oldHash}',
+      '${emails.approval}',
+      NOW() + INTERVAL '48 hours',
+      'pendiente',
+      NOW() - INTERVAL '40 minutes'
+    FROM solicitud
+    RETURNING id;
+  `);
+
+  assert.match(invitationId, /^\d+$/);
+
+  const endpoint =
+    `/api/invitations/delivery/${invitationId}/recover`;
+
+  // 1. Sin confirmación explícita: rechazado.
+  const unconfirmed = await send(
+    endpoint,
+    "admin",
+    {
+      method: "POST",
+      body: JSON.stringify({}),
+    }
+  );
+
+  assert.equal(unconfirmed.status, 400);
+
+  // 2. Usuario externo: rechazado.
+  const unauthorized = await send(
+    endpoint,
+    "outsider",
+    {
+      method: "POST",
+      body: JSON.stringify({
+        confirmarInvalidacionToken: true,
+      }),
+    }
+  );
+
+  assert.equal(unauthorized.status, 404);
+
+  // 3. El token todavía no debe haber cambiado.
+  const before = sql(`
+    SELECT token_hash
+    FROM admincond.invitaciones
+    WHERE id = ${invitationId};
+  `);
+
+  assert.equal(before, oldHash);
+
+  // 4. Administrador autorizado confirma.
+  const approved = await send(
+    endpoint,
+    "admin",
+    {
+      method: "POST",
+      body: JSON.stringify({
+        confirmarInvalidacionToken: true,
+      }),
+    }
+  );
+
+  const body = await approved.json();
+
+  assert.equal(
+    approved.status,
+    200,
+    JSON.stringify(body)
+  );
+
+  assert.equal(body.estado, "recuperada");
+
+  // Exclusivamente TEST: token devuelto
+  // para comprobar su rotación.
+  const newToken = body.invitacion?.token;
+
+  assert.equal(typeof newToken, "string");
+  assert.notEqual(newToken, oldToken);
+
+  const newHash = createHash("sha256")
+    .update(newToken)
+    .digest("hex");
+
+  // 5. PostgreSQL contiene el nuevo hash
+  // y la nueva fecha de recuperación.
+  const stored = sql(`
+    SELECT
+      token_hash,
+      estado_entrega,
+      inicio_envio_en IS NULL,
+      recuperacion_iniciada_en >
+        NOW() - INTERVAL '5 minutes'
+    FROM admincond.invitaciones
+    WHERE id = ${invitationId};
+  `).split("|");
+
+  assert.deepEqual(stored, [
+    newHash,
+    "pendiente",
+    "t",
+    "t",
+  ]);
+
+  // 6. El token anterior debe ser inválido.
+  const oldTokenResponse = await send(
+    "/api/invitations/accept",
+    "approval",
+    {
+      method: "POST",
+      body: JSON.stringify({
+        token: oldToken,
+      }),
+    }
+  );
+
+  assert.equal(oldTokenResponse.status, 400);
+
+  // 7. No puede recuperarse nuevamente
+  // de manera inmediata.
+  const repeated = await send(
+    endpoint,
+    "admin",
+    {
+      method: "POST",
+      body: JSON.stringify({
+        confirmarInvalidacionToken: true,
+      }),
+    }
+  );
+
+  assert.equal(repeated.status, 404);
+
+  // 8. Tampoco puede recuperarse una invitación
+  // pendiente normal sin recuperación previa.
+  const normalTokenHash = createHash("sha256")
+    .update(randomBytes(32))
+    .digest("hex");
+
+  const normalId = sql(`
+    WITH solicitud AS (
+      INSERT INTO admincond.solicitudes_residentes (
+        unidad_id,
+        condominio_id,
+        solicitado_por,
+        correo_invitado,
+        estado,
+        revisado_por,
+        revisada_en
+      )
+      SELECT
+        u.id,
+        u.condominio_id,
+        ${ids.resident},
+        '${emails.approval}',
+        'aprobada',
+        ${ids.admin},
+        NOW()
+      FROM admincond.unidades u
+      WHERE u.codigo = 'UNIT-A-${marker}'
+        AND u.condominio_id = ${ids.condo}
+      RETURNING id
+    )
+    INSERT INTO admincond.invitaciones (
+      solicitud_id,
+      token_hash,
+      correo_destino,
+      expira_en
+    )
+    SELECT
+      id,
+      '${normalTokenHash}',
+      '${emails.approval}',
+      NOW() + INTERVAL '48 hours'
+    FROM solicitud
+    RETURNING id;
+  `);
+
+  assert.match(normalId, /^\d+$/);
+
+  const normalResponse = await send(
+    `/api/invitations/delivery/${normalId}/recover`,
+    "admin",
+    {
+      method: "POST",
+      body: JSON.stringify({
+        confirmarInvalidacionToken: true,
+      }),
+    }
+  );
+
+  assert.equal(normalResponse.status, 404);
+});
+
+test("D34-13: dos recuperaciones concurrentes no rotan dos veces el token", async () => {
+  const oldToken = randomBytes(32).toString("base64url");
+
+  const oldHash = createHash("sha256")
+    .update(oldToken)
+    .digest("hex");
+
+  // Crear una invitación interrumpida antigua en TEST.
+  const invitationId = sql(`
+    WITH solicitud AS (
+      INSERT INTO admincond.solicitudes_residentes (
+        unidad_id,
+        condominio_id,
+        solicitado_por,
+        correo_invitado,
+        estado,
+        revisado_por,
+        revisada_en
+      )
+      SELECT
+        u.id,
+        u.condominio_id,
+        ${ids.resident},
+        '${emails.approval}',
+        'aprobada',
+        ${ids.admin},
+        NOW()
+      FROM admincond.unidades u
+      WHERE u.codigo = 'UNIT-A-${marker}'
+        AND u.condominio_id = ${ids.condo}
+      RETURNING id
+    )
+    INSERT INTO admincond.invitaciones (
+      solicitud_id,
+      token_hash,
+      correo_destino,
+      expira_en,
+      estado_entrega,
+      inicio_envio_en
+    )
+    SELECT
+      id,
+      '${oldHash}',
+      '${emails.approval}',
+      NOW() + INTERVAL '48 hours',
+      'enviando',
+      NOW() - INTERVAL '40 minutes'
+    FROM solicitud
+    RETURNING id;
+  `);
+
+  assert.match(invitationId, /^\d+$/);
+
+  // Utilizamos dos conexiones independientes a TEST.
+  const connection = {
+    host: "127.0.0.1",
+    port: 5434,
+    database: "admincond_test",
+    user: "admincond_test_api",
+    password: env.DB_PASSWORD,
+  };
+
+  const firstClient = new Client(connection);
+  const secondClient = new Client(connection);
+
+  try {
+    await Promise.all([
+      firstClient.connect(),
+      secondClient.connect(),
+    ]);
+
+    // 1. Intentar recuperar la misma invitación
+    // simultáneamente desde dos conexiones.
+    const results = await Promise.all([
+      recoverInterruptedInvitation(
+        ids.admin,
+        Number(invitationId),
+        {
+          query: firstClient.query.bind(firstClient),
+        }
+      ),
+      recoverInterruptedInvitation(
+        ids.admin,
+        Number(invitationId),
+        {
+          query: secondClient.query.bind(secondClient),
+        }
+      ),
+    ]);
+
+    // 2. Solo una recuperación puede tener éxito.
+    const successful = results.filter(
+      (result) => result !== null
+    );
+
+    assert.equal(
+      successful.length,
+      1,
+      "Solo una recuperación debe generar un nuevo token"
+    );
+
+    const recovered = successful[0];
+
+    assert.equal(typeof recovered.token, "string");
+    assert.notEqual(recovered.token, oldToken);
+
+    // 3. El hash persistido debe corresponder
+    // exactamente al token de la operación exitosa.
+    const newHash = createHash("sha256")
+      .update(recovered.token)
+      .digest("hex");
+
+    const stored = sql(`
+      SELECT
+        token_hash,
+        estado_entrega,
+        inicio_envio_en IS NULL,
+        recuperacion_iniciada_en IS NOT NULL
+      FROM admincond.invitaciones
+      WHERE id = ${invitationId};
+    `).split("|");
+
+    assert.deepEqual(stored, [
+      newHash,
+      "pendiente",
+      "t",
+      "t",
+    ]);
+
+    // 4. La invitación ya recuperada no puede
+    // recuperarse inmediatamente otra vez.
+    const repeated = await recoverInterruptedInvitation(
+      ids.admin,
+      Number(invitationId),
+      {
+        query: firstClient.query.bind(firstClient),
+      }
+    );
+
+    assert.equal(repeated, null);
+
+    // 5. El token original ya no puede aceptarse.
+    const oldTokenResponse = await send(
+      "/api/invitations/accept",
+      "approval",
+      {
+        method: "POST",
+        body: JSON.stringify({
+          token: oldToken,
+        }),
+      }
+    );
+
+    assert.equal(oldTokenResponse.status, 400);
+  } finally {
+    await Promise.allSettled([
+      firstClient.end(),
+      secondClient.end(),
+    ]);
   }
 });
