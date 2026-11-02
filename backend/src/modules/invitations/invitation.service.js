@@ -40,6 +40,7 @@ async function transaction(callback) {
 // No puede elegir arbitrariamente otra unidad.
 export async function requestResident(userId, unitId, email) {
   return transaction(async (db) => {
+    await db.query("SELECT set_config('admincond.actor',$1,true)",[String(userId)]);
     const permission = await db.query(
       `SELECT u.id, u.condominio_id
        FROM admincond.unidades u
@@ -88,7 +89,7 @@ export async function requestResident(userId, unitId, email) {
     if (!invited.rowCount) {
       throw publicError(
         400,
-        "Para esta prueba, el invitado debe tener una cuenta activa"
+        "Primero solicita al administrador que cree la cuenta del invitado"
       );
     }
 
@@ -153,6 +154,7 @@ export async function pendingRequests(userId) {
 // 3. Administrador aprueba o rechaza.
 export async function reviewRequest(userId, requestId, decision) {
   return transaction(async (db) => {
+    await db.query("SELECT set_config('admincond.actor',$1,true)",[String(userId)]);
     const found = await db.query(
       `SELECT s.id, s.unidad_id, s.condominio_id,
               s.correo_invitado, s.estado
@@ -236,6 +238,7 @@ export async function reviewRequest(userId, requestId, decision) {
 // El bloqueo y las escrituras se hacen en una transacción.
 export async function acceptInvitation(userId, token) {
   return transaction(async (db) => {
+    await db.query("SELECT set_config('admincond.actor',$1,true)",[String(userId)]);
     const found = await db.query(
       `SELECT i.id, i.estado, i.expira_en,
               i.correo_destino,

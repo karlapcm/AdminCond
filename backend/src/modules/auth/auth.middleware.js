@@ -29,7 +29,8 @@ export async function requireAuth(req, res, next) {
     }
 
     const result = await pool.query(
-      `SELECT u.id, u.nombre, u.correo
+      `SELECT u.id, u.nombre, u.correo,
+       EXISTS(SELECT 1 FROM admincond.administradores_plataforma ap WHERE ap.usuario_id=u.id AND ap.estado='activo') AS es_admin_plataforma
        FROM admincond.sesiones s
        JOIN admincond.usuarios u
          ON u.id = s.usuario_id

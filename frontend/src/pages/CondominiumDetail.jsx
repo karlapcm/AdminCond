@@ -122,7 +122,7 @@ export default function CondominiumDetail() {
               <div>
                 <h1>{condominium.nombre}</h1>
                 <p>
-                  Información consultada desde nuestra API Express.
+                  Tu comunidad y sus espacios, en un solo lugar.
                 </p>
               </div>
 
@@ -180,9 +180,7 @@ export default function CondominiumDetail() {
             />
 
             <div className="detail-info">
-              Ya puedes consultar las unidades autorizadas de este
-              condominio. La gestión de residentes, asignaciones y
-              operaciones administrativas se integrará posteriormente.
+              <Link to="/workspace">Abrir gestión de mi condominio →</Link>
             </div>
           </>
         ) : null}

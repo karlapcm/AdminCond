@@ -70,6 +70,8 @@ export async function uploadReceipt(userId, paymentId, file) {
        AND q.estado <> 'anulada'
        AND r.usuario_id = $2
        AND r.estado = 'activo'
+       AND (r.es_principal OR r.responsable_pago OR r.acceso_financiero)
+       AND un.estado = 'activa'
        AND mco.estado = 'activo'
        AND mc.estado = 'activo'
        AND co.estado = 'activo'
@@ -94,6 +96,20 @@ export async function uploadReceipt(userId, paymentId, file) {
        WHERE p.id = $1
          AND p.registrado_por = $2
          AND p.estado = 'pendiente'
+         AND EXISTS (
+           SELECT 1 FROM admincond.cuotas q
+           JOIN admincond.unidades un ON un.id=q.unidad_id AND un.condominio_id=q.condominio_id
+           JOIN admincond.condominios co ON co.id=q.condominio_id
+           JOIN admincond.clientes cl ON cl.id=co.cliente_id
+           JOIN admincond.relaciones_unidad r ON r.unidad_id=un.id AND r.condominio_id=co.id
+           JOIN admincond.membresias_condominio m ON m.usuario_id=r.usuario_id AND m.condominio_id=co.id AND m.cliente_id=cl.id
+           JOIN admincond.membresias_cliente mc ON mc.usuario_id=r.usuario_id AND mc.cliente_id=cl.id
+           JOIN admincond.usuarios actual ON actual.id=r.usuario_id
+           WHERE q.id=p.cuota_id AND q.estado<>'anulada' AND r.usuario_id=$2
+           AND r.estado='activo' AND (r.es_principal OR r.responsable_pago OR r.acceso_financiero)
+           AND m.estado='activo' AND mc.estado='activo' AND actual.estado='activo'
+           AND un.estado='activa' AND co.estado='activo' AND cl.estado='activo'
+         )
        RETURNING id, pago_id, nombre_original,
                  tipo_mime, tamano_bytes, creado_en`,
       [
@@ -151,6 +167,7 @@ export async function downloadReceipt(userId, receiptId) {
                AND r.unidad_id = q.unidad_id
                AND r.condominio_id = q.condominio_id
                AND r.estado = 'activo'
+               AND (r.es_principal OR r.responsable_pago OR r.acceso_financiero)
                AND mco.estado = 'activo'
                AND mc.estado = 'activo'
            )

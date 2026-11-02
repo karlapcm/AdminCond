@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { useNavigate, Navigate } from "react-router-dom";
+import { useNavigate, Navigate, Link } from "react-router-dom";
 import {
   ArrowRight,
   Building2,
@@ -156,6 +156,7 @@ export default function Login() {
           </form>
 
           <p className="login-help">
+            <Link to="/recover-access">Olvidé mi contraseña</Link><br />
             ¿No tienes acceso? Contacta con el administrador de
             tu condominio.
           </p>

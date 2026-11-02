@@ -31,11 +31,13 @@ import ContextSelector from "../components/ContextSelector";
 const modules = [
   {
     title: "Unidades y residentes",
+    url: '/workspace?tab=residentes',
     description: "Organiza las unidades y relaciones de residencia.",
     icon: Users,
   },
   {
     title: "Cuotas y pagos",
+    url: '/workspace?tab=finanzas',
     description: "Consulta las operaciones financieras autorizadas.",
     icon: CreditCard,
   },
@@ -167,25 +169,19 @@ export default function Dashboard() {
           </Link>
 
           {/* Módulos pendientes */}
-          <div
-            className="nav-link disabled"
-            aria-disabled="true"
-            title="Interfaz pendiente"
-          >
+          <Link to="/workspace?tab=residentes" className="nav-link">
             <Users size={19} />
             <span>Residentes</span>
-            <span className="ac-soon">Pronto</span>
-          </div>
+          </Link>
 
-          <div
-            className="nav-link disabled"
-            aria-disabled="true"
-            title="Interfaz pendiente"
-          >
+          <Link to="/workspace?tab=finanzas" className="nav-link">
             <Wallet size={19} />
             <span>Finanzas</span>
-            <span className="ac-soon">Pronto</span>
-          </div>
+          </Link>
+          <Link to="/workspace?tab=documentos" className="nav-link"><Building2 size={19}/><span>Documentos y juntas</span></Link>
+          <Link to="/workspace?tab=areas" className="nav-link"><CalendarDays size={19}/><span>Áreas comunes</span></Link>
+          <Link to="/workspace?tab=seguridad" className="nav-link"><ShieldCheck size={19}/><span>Accesos y actividad</span></Link>
+          {user?.es_admin_plataforma&&<Link to="/platform" className="nav-link"><Users size={19}/><span>Afiliaciones</span></Link>}
         </nav>
 
         {/* PARTE INFERIOR DEL SIDEBAR */}
@@ -518,7 +514,7 @@ export default function Dashboard() {
           <section className="section ac-upcoming">
             <div className="section-heading">
               <span className="ac-section-eyebrow">
-                PRÓXIMAMENTE
+                MI COMUNIDAD
               </span>
 
               <h2>
@@ -526,14 +522,13 @@ export default function Dashboard() {
               </h2>
 
               <p>
-                Estas interfaces se incorporarán
-                progresivamente.
+                Accede a tus herramientas según los permisos de tu cuenta.
               </p>
             </div>
 
             <div className="modules-grid">
               {modules.map(
-                ({ title, description, icon: Icon }) => (
+                ({ title, description, url, icon: Icon }) => (
                   <article
                     className="module-card"
                     key={title}
@@ -545,9 +540,7 @@ export default function Dashboard() {
                     <h3>{title}</h3>
                     <p>{description}</p>
 
-                    <span className="module-status">
-                      Interfaz pendiente
-                    </span>
+                    <Link to={url} className="module-status">Abrir módulo →</Link>
                   </article>
                 )
               )}
