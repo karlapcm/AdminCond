@@ -36,7 +36,8 @@ function signAccessToken(userId, sessionId) {
 
 export async function login(correo, password) {
   const result = await pool.query(
-    `SELECT id, nombre, correo, password_hash
+    `SELECT id, nombre, correo, password_hash,
+      EXISTS(SELECT 1 FROM admincond.administradores_plataforma ap WHERE ap.usuario_id=usuarios.id AND ap.estado='activo') AS es_admin_plataforma
      FROM admincond.usuarios
      WHERE LOWER(correo) = LOWER($1)
        AND estado = 'activo'`,
@@ -73,6 +74,7 @@ export async function login(correo, password) {
       id: user.id,
       nombre: user.nombre,
       correo: user.correo,
+      es_admin_plataforma: user.es_admin_plataforma,
     },
   };
 }

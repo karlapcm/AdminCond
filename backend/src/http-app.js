@@ -15,6 +15,7 @@ import { financeRouter } from "./modules/finance/finance.routes.js";
 import { receiptRouter } from "./modules/finance/receipt.routes.js";
 import { communicationRouter } from "./modules/communications/communication.routes.js";
 import { reservationRouter } from "./modules/reservations/reservation.routes.js";
+import { v1Router } from "./modules/v1/v1.routes.js";
 
 const app = express();
 
@@ -29,6 +30,8 @@ app.use(
 );
 
 app.use(express.json({ limit: "100kb" }));
+app.use('/api', (_req,res,next) => { res.setHeader('Cache-Control','no-store'); next(); });
+app.use('/api/v1', v1Router);
 
 // Estado de la API
 app.get("/api/health", (_req, res) => {
@@ -79,7 +82,7 @@ app.use((err, _req, res, _next) => {
 
   if (err?.code === "LIMIT_FILE_SIZE") {
     return res.status(413).json({
-      message: "El comprobante no puede superar 5 MB",
+      message: "El archivo no puede superar 5 MB",
     });
   }
 
@@ -94,6 +97,10 @@ app.use((err, _req, res, _next) => {
       message: "El registro ya existe",
     });
   }
+  if (['23503','23514','22003','22P02'].includes(err?.code)) {
+    return res.status(400).json({message:'Revisa las relaciones y los valores del formulario'});
+  }
+  if (err?.type === 'entity.too.large') return res.status(413).json({message:'El formulario es demasiado grande'});
 
   if (err instanceof SyntaxError && err.status === 400) {
     return res.status(400).json({

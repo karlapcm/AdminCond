@@ -6,3 +6,4 @@
 dist/
 coverage/
 backend/.env.test
+.local-v1/

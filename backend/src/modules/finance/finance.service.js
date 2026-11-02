@@ -26,6 +26,7 @@ async function transaction(callback) {
 // El residente reporta un pago de su propia unidad.
 export async function reportPayment(userId, cuotaId, monto, referencia) {
   return transaction(async (db) => {
+    await db.query("SELECT set_config('admincond.actor',$1,true)",[String(userId)]);
     const fee = await db.query(
       `SELECT q.id, q.condominio_id, q.monto
        FROM admincond.cuotas q
@@ -55,6 +56,7 @@ export async function reportPayment(userId, cuotaId, monto, referencia) {
              AND r.unidad_id = q.unidad_id
              AND r.condominio_id = q.condominio_id
              AND r.estado = 'activo'
+             AND (r.es_principal OR r.responsable_pago OR r.acceso_financiero)
              AND mco.estado = 'activo'
              AND mc.estado = 'activo'
          )
@@ -156,6 +158,7 @@ export async function pendingPayments(userId) {
 // Aprobar o rechazar dentro de una transacción.
 export async function reviewPayment(userId, pagoId, decision) {
   return transaction(async (db) => {
+    await db.query("SELECT set_config('admincond.actor',$1,true)",[String(userId)]);
     // Bloqueamos primero la cuota para serializar
     // todas las revisiones que afectan su saldo.
     const fee = await db.query(

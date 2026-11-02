@@ -6,7 +6,12 @@ import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import dotenv from "dotenv";
 import jwt from "jsonwebtoken";
-import { Client } from "pg";
+import { Client, Pool } from "pg";
+import argon2 from "argon2";
+
+import {
+  consumeAccessRecovery,
+} from "../src/modules/auth/auth.recovery.consume.js";
 
 import {
   claimInvitationDelivery,
@@ -18,6 +23,14 @@ import {
   reissueFailedInvitation,
   recoverInterruptedInvitation,
 } from "../src/modules/invitations/invitation.reissue.js";
+
+import {
+  createAccessRecovery,
+} from "../src/modules/auth/auth.recovery.js";
+
+import {
+  sendAccessRecoveryEmail,
+} from "../src/modules/auth/auth.recovery.mailer.js";
 
 const root = fileURLToPath(new URL("../../", import.meta.url));
 const envPath = fileURLToPath(new URL("../.env.test", import.meta.url));
@@ -108,6 +121,7 @@ async function send(path, role, options = {}) {
   return fetch(`${url}${path}`, {
     ...options,
     headers: {
+      Connection: 'close',
       Authorization: `Bearer ${tokens[role]}`,
       ...(options.body
         ? { "Content-Type": "application/json" }
@@ -278,10 +292,10 @@ before(async () => {
       RETURNING id INTO unit_b;
 
       INSERT INTO admincond.relaciones_unidad
-        (usuario_id, condominio_id, unidad_id, es_ocupante)
+        (usuario_id, condominio_id, unidad_id, es_ocupante, acceso_financiero)
       VALUES
-        (resident_id, condo_a, unit_a, TRUE),
-        (owner_id, condo_a, unit_b, TRUE);
+        (resident_id, condo_a, unit_a, TRUE, TRUE),
+        (owner_id, condo_a, unit_b, TRUE, FALSE);
 
       INSERT INTO admincond.areas_comunes
         (cliente_id, condominio_id, nombre, creada_por)
@@ -5081,5 +5095,1473 @@ test("D34-13: dos recuperaciones concurrentes no rotan dos veces el token", asyn
       firstClient.end(),
       secondClient.end(),
     ]);
+  }
+});
+
+test("D36-01: recuperación almacena solo el hash y no crea solicitudes para correos inexistentes", async () => {
+  await withTestQuery(async (query) => {
+    const recovery = await createAccessRecovery(
+      emails.admin,
+      { query }
+    );
+
+    assert.ok(recovery);
+    assert.equal(typeof recovery.token, "string");
+    assert.equal(recovery.expiresInMinutes, 30);
+
+    assert.equal(recovery.to, emails.admin);
+
+    // Simular que transcurrieron los 15 minutos
+    // de espera. Solo modificamos PostgreSQL TEST.
+    await query(
+      `UPDATE admincond.usuarios
+       SET ultima_recuperacion_solicitada_en =
+         NOW() - INTERVAL '16 minutes'
+       WHERE LOWER(correo) = LOWER($1)`,
+      [emails.admin]
+    );
+
+    // Comprobar que la búsqueda no depende
+    // de escribir exactamente las mismas mayúsculas.
+    const uppercaseRecovery = await createAccessRecovery(
+      emails.admin.toUpperCase(),
+      { query }
+    );
+
+    assert.ok(uppercaseRecovery);
+    assert.equal(uppercaseRecovery.to, emails.admin);
+
+    const tokenHash = createHash("sha256")
+      .update(recovery.token)
+      .digest("hex");
+
+    const stored = await query(
+      `SELECT
+         token_hash,
+         consumido_en,
+         expira_en > NOW() AS vigente
+       FROM admincond.recuperaciones_acceso
+       WHERE id = $1`,
+      [recovery.recoveryId]
+    );
+
+    assert.equal(stored.rowCount, 1);
+    assert.equal(stored.rows[0].token_hash, tokenHash);
+    assert.notEqual(stored.rows[0].token_hash, recovery.token);
+    assert.equal(stored.rows[0].consumido_en, null);
+    assert.equal(stored.rows[0].vigente, true);
+
+    const nonexistent = await createAccessRecovery(
+      `inexistente-${marker}@admincond.test`,
+      { query }
+    );
+
+    assert.equal(nonexistent, null);
+
+    const missing = await query(
+      `SELECT COUNT(*)::int AS total
+       FROM admincond.recuperaciones_acceso
+       WHERE token_hash = $1`,
+      [
+        createHash("sha256")
+          .update("token-inexistente")
+          .digest("hex"),
+      ]
+    );
+
+    assert.equal(missing.rows[0].total, 0);
+  });
+});
+
+test("D36-02: solicitud de recuperación no revela si existe el correo", async () => {
+  const correo = `privacy-d3602-${randomUUID()}@admincond.test`;
+  const inexistente = `inexistente-${randomUUID()}@admincond.test`;
+
+  const endpoint =
+    "http://127.0.0.1:3001/api/auth/password-recovery/request";
+
+  let userId;
+
+  async function requestRecovery(email) {
+    return fetch(endpoint, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ correo: email }),
+    });
+  }
+
+  try {
+    // 1. Crear una cuenta exclusiva para D36-02.
+    userId = await withTestQuery(async (query) => {
+      const result = await query(
+        `INSERT INTO admincond.usuarios
+           (nombre, correo, password_hash)
+         VALUES ($1, $2, $3)
+         RETURNING id`,
+        [
+          "Privacidad D36-02 TEST",
+          correo,
+          await argon2.hash("ClaveInicialD3602Segura!"),
+        ]
+      );
+
+      return result.rows[0].id;
+    });
+
+    // 2. Primera solicitud para la cuenta real.
+    const existing = await requestRecovery(correo);
+    const existingBody = await existing.json();
+
+    // 3. Solicitud para una cuenta inexistente.
+    const nonexistent = await requestRecovery(inexistente);
+    const nonexistentBody = await nonexistent.json();
+
+    assert.equal(existing.status, 202);
+    assert.equal(nonexistent.status, 202);
+
+    // 4. Las respuestas deben ser idénticas.
+    assert.deepEqual(existingBody, nonexistentBody);
+
+    // No se exponen credenciales ni identificadores.
+    assert.equal(existingBody.token, undefined);
+    assert.equal(existingBody.token_hash, undefined);
+    assert.equal(existingBody.recoveryId, undefined);
+
+    // 5. Solo la cuenta real debe tener
+    // una recuperación registrada.
+    await withTestQuery(async (query) => {
+      const result = await query(
+        `SELECT COUNT(*)::int AS total
+         FROM admincond.recuperaciones_acceso
+         WHERE usuario_id = $1`,
+        [userId]
+      );
+
+      assert.equal(result.rows[0].total, 1);
+    });
+
+    // 6. El correo inválido sigue rechazándose.
+    const invalid = await requestRecovery("correo-invalido");
+
+    assert.equal(invalid.status, 400);
+  } finally {
+    // Eliminar solo los datos de esta prueba.
+    if (userId) {
+      await withTestQuery(async (query) => {
+        await query(
+          `DELETE FROM admincond.usuarios
+           WHERE id = $1
+             AND correo = $2`,
+          [userId, correo]
+        );
+      });
+    }
+  }
+});
+
+test("D36-03: correo de recuperación utiliza transporte simulado", async () => {
+  const token = randomBytes(32).toString("base64url");
+
+  let transportOptions;
+  let sentMessage;
+  let closed = false;
+
+  const fakeTransport = {
+    async sendMail(message) {
+      sentMessage = message;
+
+      return {
+        accepted: [emails.admin],
+      };
+    },
+
+    close() {
+      closed = true;
+    },
+  };
+
+  await sendAccessRecoveryEmail(
+    {
+      to: emails.admin,
+      token,
+    },
+    {
+      config: {
+        host: "smtp.example.test",
+        port: 587,
+        secure: false,
+        auth: {
+          user: "test",
+          pass: "ficticia",
+        },
+        from: "AdminCond <no-reply@example.test>",
+      },
+
+      createTransport(options) {
+        transportOptions = options;
+        return fakeTransport;
+      },
+    }
+  );
+
+  assert.equal(sentMessage.to, emails.admin);
+  assert.equal(
+    sentMessage.subject,
+    "Recuperación de acceso a AdminCond"
+  );
+
+  assert.ok(sentMessage.text.includes(token));
+  assert.ok(sentMessage.text.includes("30 minutos"));
+  assert.equal(closed, true);
+
+  // No se contactó ningún servidor SMTP.
+  // El transporte fue sustituido por uno simulado.
+  assert.ok(transportOptions);
+});
+
+test("D36-04: fallo SMTP invalida token, conserva límite y respuesta uniforme", async () => {
+  const correo = `smtp-failure-${randomUUID()}@admincond.test`;
+  const inexistente = `smtp-unknown-${randomUUID()}@admincond.test`;
+
+  const endpoint =
+    "http://127.0.0.1:3002/api/auth/password-recovery/request";
+
+  let userId;
+
+  async function requestRecovery(email) {
+    const response = await fetch(endpoint, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ correo: email }),
+    });
+
+    return {
+      status: response.status,
+      body: await response.json(),
+    };
+  }
+
+  try {
+    // 1. Crear una cuenta exclusiva para D36-04.
+    userId = await withTestQuery(async (query) => {
+      const result = await query(
+        `INSERT INTO admincond.usuarios
+           (nombre, correo, password_hash)
+         VALUES ($1, $2, $3)
+         RETURNING id`,
+        [
+          "Fallo SMTP D36 TEST",
+          correo,
+          await argon2.hash("ClaveInicialD3604Segura!"),
+        ]
+      );
+
+      return result.rows[0].id;
+    });
+
+    // 2. Primera solicitud: genera un token,
+    // pero el contenedor no tiene SMTP configurado.
+    const first = await requestRecovery(correo);
+
+    // 3. Segunda solicitud inmediata:
+    // debe respetar el límite de 15 minutos.
+    const repeated = await requestRecovery(correo);
+
+    // 4. Correo inexistente:
+    // no debe revelar información.
+    const unknown = await requestRecovery(inexistente);
+
+    assert.equal(first.status, 202);
+    assert.equal(repeated.status, 202);
+    assert.equal(unknown.status, 202);
+
+    // Las respuestas públicas son idénticas.
+    assert.deepEqual(repeated.body, first.body);
+    assert.deepEqual(unknown.body, first.body);
+
+    // No se expone información sensible.
+    for (const result of [first, repeated, unknown]) {
+      assert.equal(result.body.token, undefined);
+      assert.equal(result.body.token_hash, undefined);
+      assert.equal(result.body.recoveryId, undefined);
+    }
+
+    // 5. Verificar el estado real en PostgreSQL TEST.
+    await withTestQuery(async (query) => {
+      const result = await query(
+        `SELECT
+           COUNT(*)::int AS total,
+           COUNT(*) FILTER (
+             WHERE consumido_en IS NOT NULL
+           )::int AS invalidadas,
+           COUNT(*) FILTER (
+             WHERE consumido_en IS NULL
+           )::int AS pendientes
+         FROM admincond.recuperaciones_acceso
+         WHERE usuario_id = $1`,
+        [userId]
+      );
+
+      assert.equal(result.rows[0].total, 1);
+      assert.equal(result.rows[0].invalidadas, 1);
+      assert.equal(result.rows[0].pendientes, 0);
+
+      // El límite sigue registrado después
+      // del fallo de SMTP.
+      const userResult = await query(
+        `SELECT ultima_recuperacion_solicitada_en
+         FROM admincond.usuarios
+         WHERE id = $1`,
+        [userId]
+      );
+
+      assert.equal(userResult.rowCount, 1);
+      assert.notEqual(
+        userResult.rows[0].ultima_recuperacion_solicitada_en,
+        null
+      );
+    });
+  } finally {
+    // Limpiar exclusivamente esta cuenta de prueba.
+    if (userId) {
+      await withTestQuery(async (query) => {
+        await query(
+          `DELETE FROM admincond.usuarios
+           WHERE id = $1
+             AND correo = $2`,
+          [userId, correo]
+        );
+      });
+    }
+  }
+});
+
+test("D36-05: recuperar contraseña consume token y revoca sesiones", async () => {
+  const correo = `recovery-${randomUUID()}@admincond.test`;
+  const oldPassword = "ClaveAnteriorSegura2026!";
+  const newPassword = "NuevaClaveSegura2026!";
+  const sessionId = randomUUID();
+
+  let userId;
+
+  // Conexión exclusiva a PostgreSQL TEST.
+  // El servicio usará este Pool, nunca el de DEV.
+  const recoveryPool = new Pool({
+    host: "127.0.0.1",
+    port: 5434,
+    database: "admincond_test",
+    user: "admincond_test_api",
+    password: env.DB_PASSWORD,
+    max: 2,
+  });
+
+  try {
+    // 1. Crear una cuenta exclusiva para esta prueba.
+    const originalHash = await argon2.hash(oldPassword);
+
+    userId = await withTestQuery(async (query) => {
+      const result = await query(
+        `INSERT INTO admincond.usuarios
+           (nombre, correo, password_hash)
+         VALUES ($1, $2, $3)
+         RETURNING id`,
+        ["Recuperación D36 TEST", correo, originalHash]
+      );
+
+      return result.rows[0].id;
+    });
+
+    // 2. Crear una sesión activa que luego debe revocarse.
+    await withTestQuery(async (query) => {
+      await query(
+        `INSERT INTO admincond.sesiones
+           (id, usuario_id, refresh_hash, expira_en)
+         VALUES ($1, $2, $3, NOW() + INTERVAL '1 day')`,
+        [
+          sessionId,
+          userId,
+          createHash("sha256")
+            .update(randomUUID())
+            .digest("hex"),
+        ]
+      );
+    });
+
+    // 3. Generar una recuperación válida.
+    const recovery = await withTestQuery(
+      (query) => createAccessRecovery(correo, { query })
+    );
+
+    assert.ok(recovery);
+    assert.equal(typeof recovery.token, "string");
+
+    // 4. Consumirla mediante el servicio real,
+    // usando una conexión a la base TEST.
+    const success = await consumeAccessRecovery(
+      recovery.token,
+      newPassword,
+      {
+        connect: () => recoveryPool.connect(),
+      }
+    );
+
+    assert.equal(success, true);
+
+    // 5. Verificar que las modificaciones
+    // se guardaron correctamente en PostgreSQL.
+    await withTestQuery(async (query) => {
+      const userResult = await query(
+        `SELECT password_hash
+         FROM admincond.usuarios
+         WHERE id = $1`,
+        [userId]
+      );
+
+      assert.equal(userResult.rowCount, 1);
+
+      const storedHash = userResult.rows[0].password_hash;
+
+      // La contraseña nueva funciona.
+      assert.equal(
+        await argon2.verify(storedHash, newPassword),
+        true
+      );
+
+      // La contraseña anterior deja de funcionar.
+      assert.equal(
+        await argon2.verify(storedHash, oldPassword),
+        false
+      );
+
+      // El token quedó consumido.
+      const recoveryResult = await query(
+        `SELECT consumido_en
+         FROM admincond.recuperaciones_acceso
+         WHERE id = $1`,
+        [recovery.recoveryId]
+      );
+
+      assert.equal(recoveryResult.rowCount, 1);
+      assert.notEqual(
+        recoveryResult.rows[0].consumido_en,
+        null
+      );
+
+      // La sesión anterior quedó revocada.
+      const sessionResult = await query(
+        `SELECT revocada_en
+         FROM admincond.sesiones
+         WHERE id = $1`,
+        [sessionId]
+      );
+
+      assert.equal(sessionResult.rowCount, 1);
+      assert.notEqual(
+        sessionResult.rows[0].revocada_en,
+        null
+      );
+    });
+
+    // 6. El mismo token no puede reutilizarse.
+    const repeated = await consumeAccessRecovery(
+      recovery.token,
+      "OtraClaveSegura2026!",
+      {
+        connect: () => recoveryPool.connect(),
+      }
+    );
+
+    assert.equal(repeated, false);
+  } finally {
+    // Eliminar exclusivamente la cuenta de esta prueba.
+    // Las relaciones con recuperación y sesiones
+    // se eliminan mediante ON DELETE CASCADE.
+    try {
+      if (userId) {
+        await withTestQuery(async (query) => {
+          await query(
+            `DELETE FROM admincond.usuarios
+             WHERE id = $1
+               AND correo = $2`,
+            [userId, correo]
+          );
+        });
+      }
+    } finally {
+      await recoveryPool.end();
+    }
+  }
+});
+
+test("D36-06: dos tokens simultáneos solo permiten un cambio de contraseña", async () => {
+  const correo = `concurrent-${randomUUID()}@admincond.test`;
+  const passwordA = "ClaveConcurrenteA2026!";
+  const passwordB = "ClaveConcurrenteB2026!";
+  const originalPassword = "ClaveAnteriorD362026!";
+
+  let userId;
+
+  // Dos conexiones independientes a TEST.
+  const recoveryPool = new Pool({
+    host: "127.0.0.1",
+    port: 5434,
+    database: "admincond_test",
+    user: "admincond_test_api",
+    password: env.DB_PASSWORD,
+    max: 2,
+  });
+
+  try {
+    // 1. Crear una cuenta exclusiva para la prueba.
+    userId = await withTestQuery(async (query) => {
+      const result = await query(
+        `INSERT INTO admincond.usuarios
+           (nombre, correo, password_hash)
+         VALUES ($1, $2, $3)
+         RETURNING id`,
+        [
+          "Concurrencia D36 TEST",
+          correo,
+          await argon2.hash(originalPassword),
+        ]
+      );
+
+      return result.rows[0].id;
+    });
+
+    // 2. Crear dos recuperaciones vigentes
+    // para la misma cuenta.
+
+    // Primera recuperación: genera el token A.
+    const recoveryA = await withTestQuery(
+      (query) => createAccessRecovery(correo, { query })
+    );
+
+    assert.ok(recoveryA);
+
+    // Simulamos que transcurrieron 16 minutos
+    // desde la última solicitud.
+    // Esto se realiza únicamente en PostgreSQL TEST.
+    await withTestQuery(async (query) => {
+      await query(
+        `UPDATE admincond.usuarios
+         SET ultima_recuperacion_solicitada_en =
+           NOW() - INTERVAL '16 minutes'
+         WHERE id = $1`,
+        [userId]
+      );
+    });
+
+    // Segunda recuperación: genera el token B.
+    const recoveryB = await withTestQuery(
+      (query) => createAccessRecovery(correo, { query })
+    );
+
+    assert.ok(recoveryB);
+    assert.notEqual(recoveryA.token, recoveryB.token);
+
+    assert.ok(recoveryA);
+    assert.ok(recoveryB);
+    assert.notEqual(recoveryA.token, recoveryB.token);
+
+    // 3. Ejecutar los cambios simultáneamente.
+    const attempts = await Promise.allSettled([
+      consumeAccessRecovery(
+        recoveryA.token,
+        passwordA,
+        { connect: () => recoveryPool.connect() }
+      ),
+      consumeAccessRecovery(
+        recoveryB.token,
+        passwordB,
+        { connect: () => recoveryPool.connect() }
+      ),
+    ]);
+
+    // No debe haber errores de concurrencia
+    // como deadlocks o transacciones abortadas.
+    assert.ok(
+      attempts.every((attempt) => attempt.status === "fulfilled"),
+      JSON.stringify(
+        attempts.map((attempt) => ({
+          status: attempt.status,
+          reason: attempt.status === "rejected"
+            ? attempt.reason?.message
+            : undefined,
+        }))
+      )
+    );
+
+    const results = attempts.map((attempt) => attempt.value);
+
+    // Exactamente una recuperación se completa.
+    assert.equal(
+      results.filter((value) => value === true).length,
+      1
+    );
+
+    assert.equal(
+      results.filter((value) => value === false).length,
+      1
+    );
+
+    // 4. Solo debe funcionar la contraseña ganadora.
+    const winningPassword = results[0]
+      ? passwordA
+      : passwordB;
+
+    const losingPassword = results[0]
+      ? passwordB
+      : passwordA;
+
+    await withTestQuery(async (query) => {
+      const userResult = await query(
+        `SELECT password_hash
+         FROM admincond.usuarios
+         WHERE id = $1`,
+        [userId]
+      );
+
+      assert.equal(userResult.rowCount, 1);
+
+      const storedHash = userResult.rows[0].password_hash;
+
+      assert.equal(
+        await argon2.verify(storedHash, winningPassword),
+        true
+      );
+
+      assert.equal(
+        await argon2.verify(storedHash, losingPassword),
+        false
+      );
+
+      assert.equal(
+        await argon2.verify(storedHash, originalPassword),
+        false
+      );
+
+      // 5. Ambos tokens quedaron invalidados,
+      // incluido el que perdió la carrera.
+      const recoveryResult = await query(
+        `SELECT
+           COUNT(*)::int AS total,
+           COUNT(*) FILTER (
+             WHERE consumido_en IS NOT NULL
+           )::int AS consumidas
+         FROM admincond.recuperaciones_acceso
+         WHERE usuario_id = $1`,
+        [userId]
+      );
+
+      assert.equal(recoveryResult.rows[0].total, 2);
+      assert.equal(recoveryResult.rows[0].consumidas, 2);
+    });
+
+    // 6. Ninguno de los tokens puede volver a utilizarse.
+    const retryA = await consumeAccessRecovery(
+      recoveryA.token,
+      "OtraClaveValida2026!",
+      { connect: () => recoveryPool.connect() }
+    );
+
+    const retryB = await consumeAccessRecovery(
+      recoveryB.token,
+      "OtraClaveValida2026!",
+      { connect: () => recoveryPool.connect() }
+    );
+
+    assert.equal(retryA, false);
+    assert.equal(retryB, false);
+  } finally {
+    try {
+      if (userId) {
+        await withTestQuery(async (query) => {
+          await query(
+            `DELETE FROM admincond.usuarios
+             WHERE id = $1
+               AND correo = $2`,
+            [userId, correo]
+          );
+        });
+      }
+    } finally {
+      await recoveryPool.end();
+    }
+  }
+});
+
+test("D36-07: HTTP cambia contraseña, revoca JWT y bloquea reutilización", async () => {
+  const correo = `http-recovery-${randomUUID()}@admincond.test`;
+  const oldPassword = "ClaveAnteriorD3607!";
+  const newPassword = "NuevaClaveD3607Segura!";
+  const sessionId = randomUUID();
+
+  let userId;
+
+  try {
+    // 1. Crear una cuenta exclusiva en TEST.
+    userId = await withTestQuery(async (query) => {
+      const result = await query(
+        `INSERT INTO admincond.usuarios
+           (nombre, correo, password_hash)
+         VALUES ($1, $2, $3)
+         RETURNING id`,
+        [
+          "Recuperación HTTP D36 TEST",
+          correo,
+          await argon2.hash(oldPassword),
+        ]
+      );
+
+      return result.rows[0].id;
+    });
+
+    // 2. Crear una sesión válida para esa cuenta.
+    await withTestQuery(async (query) => {
+      await query(
+        `INSERT INTO admincond.sesiones
+           (id, usuario_id, refresh_hash, expira_en)
+         VALUES ($1, $2, $3, NOW() + INTERVAL '1 day')`,
+        [
+          sessionId,
+          userId,
+          createHash("sha256")
+            .update(randomUUID())
+            .digest("hex"),
+        ]
+      );
+    });
+
+    const oldJwt = signToken(userId, sessionId);
+
+    // 3. Verificar que inicialmente el JWT funciona.
+    const before = await fetch(`${url}/api/auth/me`, {
+      headers: {
+        Authorization: `Bearer ${oldJwt}`,
+      },
+    });
+
+    assert.equal(before.status, 200);
+
+    // 4. Crear un token de recuperación en TEST.
+    const recovery = await withTestQuery(
+      (query) => createAccessRecovery(correo, { query })
+    );
+
+    assert.ok(recovery);
+
+    // 5. Cambiar contraseña mediante HTTP.
+    const changed = await fetch(
+      `${url}/api/auth/password-recovery/confirm`,
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          token: recovery.token,
+          nuevaPassword: newPassword,
+        }),
+      }
+    );
+
+    const changedBody = await changed.json();
+
+    assert.equal(
+      changed.status,
+      200,
+      JSON.stringify(changedBody)
+    );
+
+    // La API no debe devolver credenciales.
+    assert.equal(changedBody.token, undefined);
+    assert.equal(changedBody.accessToken, undefined);
+
+    // 6. La sesión anterior debe quedar revocada.
+    const after = await fetch(`${url}/api/auth/me`, {
+      headers: {
+        Authorization: `Bearer ${oldJwt}`,
+      },
+    });
+
+    assert.equal(after.status, 401);
+
+    // 7. El mismo token ya no puede reutilizarse.
+    const repeated = await fetch(
+      `${url}/api/auth/password-recovery/confirm`,
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          token: recovery.token,
+          nuevaPassword: "OtraClaveD3607Segura!",
+        }),
+      }
+    );
+
+    assert.equal(repeated.status, 400);
+
+    // 8. Comprobar la contraseña almacenada.
+    await withTestQuery(async (query) => {
+      const result = await query(
+        `SELECT password_hash
+         FROM admincond.usuarios
+         WHERE id = $1`,
+        [userId]
+      );
+
+      assert.equal(result.rowCount, 1);
+
+      assert.equal(
+        await argon2.verify(
+          result.rows[0].password_hash,
+          newPassword
+        ),
+        true
+      );
+
+      assert.equal(
+        await argon2.verify(
+          result.rows[0].password_hash,
+          oldPassword
+        ),
+        false
+      );
+    });
+  } finally {
+    // Limpiar solamente la cuenta creada
+    // para esta prueba automatizada.
+    if (userId) {
+      await withTestQuery(async (query) => {
+        await query(
+          `DELETE FROM admincond.usuarios
+           WHERE id = $1
+             AND correo = $2`,
+          [userId, correo]
+        );
+      });
+    }
+  }
+});
+
+test("D36-08: tokens vencidos e inexistentes no modifican contraseñas", async () => {
+  const correo = `expired-${randomUUID()}@admincond.test`;
+  const originalPassword = "ClaveOriginalD3608!";
+  const newPassword = "NuevaClaveD3608Segura!";
+  const sessionId = randomUUID();
+
+  let userId;
+
+  try {
+    // 1. Crear una cuenta exclusiva en TEST.
+    userId = await withTestQuery(async (query) => {
+      const result = await query(
+        `INSERT INTO admincond.usuarios
+           (nombre, correo, password_hash)
+         VALUES ($1, $2, $3)
+         RETURNING id`,
+        [
+          "Recuperación vencida D36 TEST",
+          correo,
+          await argon2.hash(originalPassword),
+        ]
+      );
+
+      return result.rows[0].id;
+    });
+
+    // 2. Crear una sesión activa.
+    await withTestQuery(async (query) => {
+      await query(
+        `INSERT INTO admincond.sesiones
+           (id, usuario_id, refresh_hash, expira_en)
+         VALUES ($1, $2, $3, NOW() + INTERVAL '1 day')`,
+        [
+          sessionId,
+          userId,
+          createHash("sha256")
+            .update(randomUUID())
+            .digest("hex"),
+        ]
+      );
+    });
+
+    const activeJwt = signToken(userId, sessionId);
+
+    // 3. Generar una recuperación válida.
+    const recovery = await withTestQuery(
+      (query) => createAccessRecovery(correo, { query })
+    );
+
+    assert.ok(recovery);
+
+    // 4. Simular una recuperación creada hace
+    // 40 minutos y vencida hace 10 minutos.
+    //
+    // Conservamos la regla:
+    // expira_en > creado_en.
+    await withTestQuery(async (query) => {
+      await query(
+        `UPDATE admincond.recuperaciones_acceso
+         SET creado_en = NOW() - INTERVAL '40 minutes',
+             expira_en = NOW() - INTERVAL '10 minutes'
+         WHERE id = $1`,
+        [recovery.recoveryId]
+      );
+    });
+
+    const endpoint =
+      `${url}/api/auth/password-recovery/confirm`;
+
+    async function confirm(token) {
+      return fetch(endpoint, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          token,
+          nuevaPassword: newPassword,
+        }),
+      });
+    }
+
+    // 5. Un token vencido debe rechazarse.
+    const expired = await confirm(recovery.token);
+
+    assert.equal(expired.status, 400);
+
+    // 6. Un token aleatorio inexistente
+    // también debe rechazarse.
+    const nonexistentToken = randomBytes(32)
+      .toString("base64url");
+
+    const nonexistent = await confirm(nonexistentToken);
+
+    assert.equal(nonexistent.status, 400);
+
+    // 7. Comprobar que el usuario no cambió.
+    await withTestQuery(async (query) => {
+      const result = await query(
+        `SELECT password_hash
+         FROM admincond.usuarios
+         WHERE id = $1`,
+        [userId]
+      );
+
+      assert.equal(result.rowCount, 1);
+
+      assert.equal(
+        await argon2.verify(
+          result.rows[0].password_hash,
+          originalPassword
+        ),
+        true
+      );
+
+      assert.equal(
+        await argon2.verify(
+          result.rows[0].password_hash,
+          newPassword
+        ),
+        false
+      );
+
+      // La sesión anterior no debe revocarse
+      // por una recuperación rechazada.
+      const session = await query(
+        `SELECT revocada_en
+         FROM admincond.sesiones
+         WHERE id = $1`,
+        [sessionId]
+      );
+
+      assert.equal(session.rowCount, 1);
+      assert.equal(session.rows[0].revocada_en, null);
+
+      // El token vencido no se consumió
+      // ni permitió ninguna modificación.
+      const storedRecovery = await query(
+        `SELECT consumido_en
+         FROM admincond.recuperaciones_acceso
+         WHERE id = $1`,
+        [recovery.recoveryId]
+      );
+
+      assert.equal(storedRecovery.rows[0].consumido_en, null);
+    });
+
+    // 8. El JWT existente continúa funcionando.
+    const sessionResponse = await fetch(
+      `${url}/api/auth/me`,
+      {
+        headers: {
+          Authorization: `Bearer ${activeJwt}`,
+        },
+      }
+    );
+
+    assert.equal(sessionResponse.status, 200);
+  } finally {
+    // Eliminar únicamente los datos
+    // de la cuenta creada para esta prueba.
+    if (userId) {
+      await withTestQuery(async (query) => {
+        await query(
+          `DELETE FROM admincond.usuarios
+           WHERE id = $1
+             AND correo = $2`,
+          [userId, correo]
+        );
+      });
+    }
+  }
+});
+
+test("D36-09: limita solicitudes de recuperación repetidas por cuenta", async () => {
+  const correo = `limite-${randomUUID()}@admincond.test`;
+  let userId;
+
+  try {
+    // Crear una cuenta exclusiva en TEST.
+    userId = await withTestQuery(async (query) => {
+      const result = await query(
+        `INSERT INTO admincond.usuarios
+           (nombre, correo, password_hash)
+         VALUES ($1, $2, $3)
+         RETURNING id`,
+        [
+          "Límite recuperación D36 TEST",
+          correo,
+          await argon2.hash("ClaveInicialD3609Segura!"),
+        ]
+      );
+
+      return result.rows[0].id;
+    });
+
+    // Primera solicitud: debe crear un token.
+    const first = await withTestQuery(
+      (query) => createAccessRecovery(correo, { query })
+    );
+
+    assert.ok(first);
+
+    // Segunda solicitud inmediata:
+    // no debería generar otro token.
+    const second = await withTestQuery(
+      (query) => createAccessRecovery(correo, { query })
+    );
+
+    assert.equal(second, null);
+
+    // Solo debe existir una recuperación.
+    await withTestQuery(async (query) => {
+      const result = await query(
+        `SELECT COUNT(*)::int AS total
+         FROM admincond.recuperaciones_acceso
+         WHERE usuario_id = $1`,
+        [userId]
+      );
+
+      assert.equal(result.rows[0].total, 1);
+    });
+  } finally {
+    if (userId) {
+      await withTestQuery(async (query) => {
+        await query(
+          `DELETE FROM admincond.usuarios
+           WHERE id = $1
+             AND correo = $2`,
+          [userId, correo]
+        );
+      });
+    }
+  }
+});
+
+test("D36-10: dos solicitudes simultáneas solo generan una recuperación", async () => {
+  const correo = `race-recovery-${randomUUID()}@admincond.test`;
+  let userId;
+
+  // Dos conexiones independientes a PostgreSQL TEST.
+  const recoveryPool = new Pool({
+    host: "127.0.0.1",
+    port: 5434,
+    database: "admincond_test",
+    user: "admincond_test_api",
+    password: env.DB_PASSWORD,
+    max: 2,
+  });
+
+  try {
+    // 1. Crear una cuenta exclusiva para esta prueba.
+    userId = await withTestQuery(async (query) => {
+      const result = await query(
+        `INSERT INTO admincond.usuarios
+           (nombre, correo, password_hash)
+         VALUES ($1, $2, $3)
+         RETURNING id`,
+        [
+          "Concurrencia solicitudes D36 TEST",
+          correo,
+          await argon2.hash("ClaveInicialD3610Segura!"),
+        ]
+      );
+
+      return result.rows[0].id;
+    });
+
+    // 2. Enviar dos solicitudes simultáneas.
+    // Cada una utiliza su propia conexión.
+    async function requestRecovery() {
+      const client = await recoveryPool.connect();
+
+      try {
+        return await createAccessRecovery(correo, {
+          query: client.query.bind(client),
+        });
+      } finally {
+        client.release();
+      }
+    }
+
+    const attempts = await Promise.allSettled([
+      requestRecovery(),
+      requestRecovery(),
+    ]);
+
+    // Ninguna debe producir un error SQL.
+    assert.ok(
+      attempts.every((attempt) => attempt.status === "fulfilled"),
+      JSON.stringify(
+        attempts.map((attempt) => ({
+          status: attempt.status,
+          reason: attempt.status === "rejected"
+            ? attempt.reason?.message
+            : undefined,
+        }))
+      )
+    );
+
+    const results = attempts.map((attempt) => attempt.value);
+
+    // Solo una solicitud obtiene un token.
+    assert.equal(
+      results.filter((result) => result !== null).length,
+      1
+    );
+
+    // La otra queda limitada.
+    assert.equal(
+      results.filter((result) => result === null).length,
+      1
+    );
+
+    // 3. Comprobar los registros reales en TEST.
+    await withTestQuery(async (query) => {
+      const result = await query(
+        `SELECT COUNT(*)::int AS total
+         FROM admincond.recuperaciones_acceso
+         WHERE usuario_id = $1`,
+        [userId]
+      );
+
+      assert.equal(result.rows[0].total, 1);
+    });
+
+    // 4. Una tercera solicitud inmediata
+    // también debe quedar limitada.
+    const third = await withTestQuery(
+      (query) => createAccessRecovery(correo, { query })
+    );
+
+    assert.equal(third, null);
+  } finally {
+    // Limpiar únicamente esta cuenta de prueba.
+    try {
+      if (userId) {
+        await withTestQuery(async (query) => {
+          await query(
+            `DELETE FROM admincond.usuarios
+             WHERE id = $1
+               AND correo = $2`,
+            [userId, correo]
+          );
+        });
+      }
+    } finally {
+      await recoveryPool.end();
+    }
+  }
+});
+
+test("D36-11: permite otra recuperación después del intervalo de seguridad", async () => {
+  const correo = `cooldown-${randomUUID()}@admincond.test`;
+  let userId;
+
+  try {
+    // 1. Crear una cuenta exclusiva en TEST.
+    userId = await withTestQuery(async (query) => {
+      const result = await query(
+        `INSERT INTO admincond.usuarios
+           (nombre, correo, password_hash)
+         VALUES ($1, $2, $3)
+         RETURNING id`,
+        [
+          "Intervalo recuperación D36 TEST",
+          correo,
+          await argon2.hash("ClaveInicialD3611Segura!"),
+        ]
+      );
+
+      return result.rows[0].id;
+    });
+
+    // 2. Primera recuperación: permitida.
+    const first = await withTestQuery(
+      (query) => createAccessRecovery(correo, { query })
+    );
+
+    assert.ok(first);
+
+    // 3. Simular que pasaron 14 minutos.
+    await withTestQuery(async (query) => {
+      await query(
+        `UPDATE admincond.usuarios
+         SET ultima_recuperacion_solicitada_en =
+           NOW() - INTERVAL '14 minutes'
+         WHERE id = $1`,
+        [userId]
+      );
+    });
+
+    // Aún no puede solicitar otro código.
+    const tooEarly = await withTestQuery(
+      (query) => createAccessRecovery(correo, { query })
+    );
+
+    assert.equal(tooEarly, null);
+
+    // 4. Simular que pasaron 16 minutos.
+    await withTestQuery(async (query) => {
+      await query(
+        `UPDATE admincond.usuarios
+         SET ultima_recuperacion_solicitada_en =
+           NOW() - INTERVAL '16 minutes'
+         WHERE id = $1`,
+        [userId]
+      );
+    });
+
+    // Ahora sí debe permitir otra recuperación.
+    const second = await withTestQuery(
+      (query) => createAccessRecovery(correo, { query })
+    );
+
+    assert.ok(second);
+    assert.notEqual(first.token, second.token);
+
+    // 5. Verificar que existen exactamente
+    // dos recuperaciones para esta cuenta.
+    await withTestQuery(async (query) => {
+      const result = await query(
+        `SELECT COUNT(*)::int AS total
+         FROM admincond.recuperaciones_acceso
+         WHERE usuario_id = $1`,
+        [userId]
+      );
+
+      assert.equal(result.rows[0].total, 2);
+    });
+
+    // 6. Tras la segunda recuperación,
+    // el intervalo comienza nuevamente.
+    const immediate = await withTestQuery(
+      (query) => createAccessRecovery(correo, { query })
+    );
+
+    assert.equal(immediate, null);
+  } finally {
+    // Limpiar únicamente la cuenta de prueba.
+    if (userId) {
+      await withTestQuery(async (query) => {
+        await query(
+          `DELETE FROM admincond.usuarios
+           WHERE id = $1
+             AND correo = $2`,
+          [userId, correo]
+        );
+      });
+    }
+  }
+});
+
+test("D36-12: recuperación HTTP no revela cuentas ni límite por correo", async () => {
+  const correo = `privacy-${randomUUID()}@admincond.test`;
+  const inexistente = `unknown-${randomUUID()}@admincond.test`;
+  let userId;
+
+  try {
+    // 1. Crear una cuenta exclusiva en TEST.
+    userId = await withTestQuery(async (query) => {
+      const result = await query(
+        `INSERT INTO admincond.usuarios
+           (nombre, correo, password_hash)
+         VALUES ($1, $2, $3)
+         RETURNING id`,
+        [
+          "Privacidad recuperación D36 TEST",
+          correo,
+          await argon2.hash("ClaveInicialD3612Segura!"),
+        ]
+      );
+
+      return result.rows[0].id;
+    });
+
+    const endpoint =
+      `${url}/api/auth/password-recovery/request`;
+
+    async function requestRecovery(email) {
+      const response = await fetch(endpoint, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ correo: email }),
+      });
+
+      return {
+        status: response.status,
+        body: await response.json(),
+      };
+    }
+
+    // 2. Cuenta existente, primera solicitud.
+    const registered = await requestRecovery(correo);
+
+    // 3. Cuenta existente, solicitud inmediata.
+    const limited = await requestRecovery(correo);
+
+    // 4. Cuenta inexistente.
+    const unknown = await requestRecovery(inexistente);
+
+    // 5. Las tres respuestas públicas son iguales.
+    assert.equal(registered.status, 202);
+    assert.equal(limited.status, 202);
+    assert.equal(unknown.status, 202);
+
+    assert.deepEqual(limited.body, registered.body);
+    assert.deepEqual(unknown.body, registered.body);
+
+    // No debe aparecer información sensible.
+    for (const result of [registered, limited, unknown]) {
+      const serialized = JSON.stringify(result.body);
+
+      assert.equal(result.body.token, undefined);
+      assert.equal(result.body.recoveryId, undefined);
+      assert.equal(serialized.includes(correo), false);
+      assert.equal(serialized.includes(inexistente), false);
+    }
+
+    // 6. Solo la primera solicitud generó token.
+    await withTestQuery(async (query) => {
+      const result = await query(
+        `SELECT COUNT(*)::int AS total
+         FROM admincond.recuperaciones_acceso
+         WHERE usuario_id = $1`,
+        [userId]
+      );
+
+      assert.equal(result.rows[0].total, 1);
+    });
+  } finally {
+    // Eliminar únicamente los datos creados
+    // por esta prueba.
+    if (userId) {
+      await withTestQuery(async (query) => {
+        await query(
+          `DELETE FROM admincond.usuarios
+           WHERE id = $1
+             AND correo = $2`,
+          [userId, correo]
+        );
+      });
+    }
+  }
+});
+
+test("D36-13: mayúsculas no permiten evadir el límite de recuperación", async () => {
+  const correo = `case-${randomUUID()}@admincond.test`;
+  let userId;
+
+  try {
+    // Crear una cuenta exclusiva para esta prueba.
+    userId = await withTestQuery(async (query) => {
+      const result = await query(
+        `INSERT INTO admincond.usuarios
+           (nombre, correo, password_hash)
+         VALUES ($1, $2, $3)
+         RETURNING id`,
+        [
+          "Mayúsculas D36 TEST",
+          correo,
+          await argon2.hash("ClaveInicialD3613Segura!"),
+        ]
+      );
+
+      return result.rows[0].id;
+    });
+
+    // Primera solicitud con correo normal.
+    const first = await withTestQuery(
+      (query) => createAccessRecovery(correo, { query })
+    );
+
+    assert.ok(first);
+
+    // Segunda solicitud con el mismo correo
+    // escrito completamente en mayúsculas.
+    const second = await withTestQuery(
+      (query) => createAccessRecovery(
+        correo.toUpperCase(),
+        { query }
+      )
+    );
+
+    // El límite debe impedir crear otro token.
+    assert.equal(second, null);
+
+    // Confirmar que solo existe un registro.
+    await withTestQuery(async (query) => {
+      const result = await query(
+        `SELECT COUNT(*)::int AS total
+         FROM admincond.recuperaciones_acceso
+         WHERE usuario_id = $1`,
+        [userId]
+      );
+
+      assert.equal(result.rows[0].total, 1);
+    });
+  } finally {
+    // Limpiar exclusivamente la cuenta de prueba.
+    if (userId) {
+      await withTestQuery(async (query) => {
+        await query(
+          `DELETE FROM admincond.usuarios
+           WHERE id = $1
+             AND correo = $2`,
+          [userId, correo]
+        );
+      });
+    }
   }
 });

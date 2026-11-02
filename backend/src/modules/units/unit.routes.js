@@ -145,6 +145,7 @@ unitRouter.get("/:unitId/people", async (req, res, next) => {
     const result = await pool.query(
       `SELECT
          u.id,
+         r.id AS relacion_id,
          u.nombre,
          r.es_propietario,
          r.es_inquilino,

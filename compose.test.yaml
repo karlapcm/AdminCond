@@ -44,6 +44,13 @@ services:
       DB_USER: admincond_test_api
       RECEIPTS_DIR: /tmp/admincond-test-receipts
       ALLOW_DEV_INVITATION_TOKENS: "true"
+# D36: transporte simulado exclusivamente en TEST.
+      SMTP_TEST_TRANSPORT: "true"
+      SMTP_HOST: "smtp.example.test"
+      SMTP_PORT: "587"
+      SMTP_USER: "usuario-test"
+      SMTP_PASS: "clave-ficticia"
+      SMTP_FROM: "AdminCond <no-reply@example.test>"
 
     ports:
       - "127.0.0.1:3001:3000"

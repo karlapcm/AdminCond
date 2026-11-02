@@ -52,7 +52,7 @@ test("D20-01: utiliza exclusivamente admincond_test", () => {
   assert.equal(database, "admincond_test");
 });
 
-test("D20-02: existen las 19 tablas del esquema", () => {
+test("D20-02: existen las 26 tablas del esquema V1", () => {
   const count = queryTestDatabase(`
     SELECT COUNT(*)
     FROM information_schema.tables
@@ -60,7 +60,19 @@ test("D20-02: existen las 19 tablas del esquema", () => {
       AND table_type = 'BASE TABLE';
   `);
 
-  assert.equal(Number(count), 19);
+  assert.equal(Number(count), 26);
+
+  // D36: verificar que la tabla nueva
+  // realmente forma parte del esquema.
+  const recoveryTable = queryTestDatabase(`
+    SELECT COUNT(*)
+    FROM information_schema.tables
+    WHERE table_schema = 'admincond'
+      AND table_name = 'recuperaciones_acceso'
+      AND table_type = 'BASE TABLE';
+  `);
+
+  assert.equal(Number(recoveryTable), 1);
 });
 
 test("D20-03: las tablas pertenecen al migrador", () => {

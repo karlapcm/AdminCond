@@ -161,6 +161,7 @@ financeRouter.get(
         AND mc.cliente_id = cl.id
        WHERE r.usuario_id = $1
          AND r.estado = 'activo'
+         AND (r.es_principal OR r.responsable_pago OR r.acceso_financiero)
          AND mco.estado = 'activo'
          AND mc.estado = 'activo'
          AND un.estado = 'activa'

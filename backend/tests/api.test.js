@@ -51,6 +51,23 @@ test("D20-09: API responde correctamente", async () => {
   assert.equal(response.status, 200);
   assert.equal(body.status, "ok");
 });
+test('V1-HTTP: las nuevas operaciones privadas rechazan sesiones ausentes',async()=>{
+ for(const path of ['/api/v1/profile','/api/v1/affiliations','/api/v1/condominiums/1/workspace','/api/v1/condominiums/1/fees','/api/v1/condominiums/1/documents/1','/api/v1/condominiums/1/audit']){
+  const response=await fetch(`${baseUrl}${path}`);
+  assert.equal(response.status,401,path);
+  assert.equal(response.headers.get('cache-control'),'no-store');
+ }
+ for(const path of ['/api/v1/accounts','/api/v1/condominiums/1/units','/api/v1/condominiums/1/people','/api/v1/condominiums/1/financial-permissions']){
+  assert.equal((await fetch(`${baseUrl}${path}`,{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'})).status,401,path);
+ }
+});
+test('V1-HTTP: afiliación inválida y formularios excesivos no alcanzan la base',async()=>{
+ const invalid=await fetch(`${baseUrl}/api/v1/affiliations`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({nombre:'x',correo:'no-es-correo'})});
+ assert.equal(invalid.status,400);
+ const large=await fetch(`${baseUrl}/api/v1/affiliations`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({contenido:'a'.repeat(110000)})});
+ assert.equal(large.status,413);
+ const body=await large.json();assert.equal(body.stack,undefined);
+});
 
 test("D20-10: /auth/me rechaza acceso sin JWT", async () => {
   const response = await fetch(`${baseUrl}/api/auth/me`);

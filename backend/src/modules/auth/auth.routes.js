@@ -2,6 +2,16 @@
 import { Router } from "express";
 import { rateLimit } from "express-rate-limit";
 import { z } from "zod";
+import { pool } from "../../database/pool.js";
+import { createAccessRecovery } from "./auth.recovery.js";
+
+import {
+  sendAccessRecoveryEmail,
+} from "./auth.recovery.mailer.js";
+
+import {
+  consumeAccessRecovery,
+} from "./auth.recovery.consume.js";
 
 import {
   login,
@@ -61,6 +71,106 @@ const loginSchema = z.object({
 const handleAsync = (fn) => (req, res, next) => {
   Promise.resolve(fn(req, res, next)).catch(next);
 };
+
+const recoveryRequestSchema = z.object({
+  correo: z.email().max(254),
+});
+
+authRouter.post(
+  "/password-recovery/request",
+  limiter,
+  handleAsync(async (req, res) => {
+    const parsed = recoveryRequestSchema.safeParse(req.body);
+
+    if (!parsed.success) {
+      return res.status(400).json({
+        message: "Datos inválidos",
+      });
+    }
+
+    // La función interna puede devolver null,
+    // pero nunca revelamos esa diferencia al solicitante.
+
+    const recovery = await createAccessRecovery(
+      parsed.data.correo
+    );
+
+    if (recovery) {
+      try {
+        // TEST: utiliza el transporte simulado.
+        // Nunca devolver el token en la respuesta HTTP.
+        await sendAccessRecoveryEmail({
+          to: recovery.to,
+          token: recovery.token,
+        });
+      } catch {
+        // Si no se pudo enviar, invalidamos el token
+        // para no conservar una recuperación utilizable
+        // que no pudo entregarse.
+        await pool.query(
+          `UPDATE admincond.recuperaciones_acceso
+          SET consumido_en = NOW()
+          WHERE id = $1
+            AND consumido_en IS NULL`,
+          [recovery.recoveryId]
+        );
+
+        // La respuesta pública sigue siendo genérica.
+      }
+    }
+
+    return res.status(202).json({
+      message:
+        "Si el correo corresponde a una cuenta activa, " +
+        "recibirás instrucciones para recuperar tu acceso.",
+    });
+  })
+);
+
+/**
+ * POST /api/auth/password-recovery/confirm
+ *
+ * Permite establecer una nueva contraseña
+ * mediante un token temporal de un solo uso.
+ *
+ * No requiere una sesión previa.
+ */
+const recoveryConfirmSchema = z.object({
+  token: z.string().regex(/^[A-Za-z0-9_-]{43}$/),
+  nuevaPassword: z.string().min(12).max(128),
+});
+
+authRouter.post(
+  "/password-recovery/confirm",
+  limiter,
+  handleAsync(async (req, res) => {
+    const parsed = recoveryConfirmSchema.safeParse(req.body);
+
+    if (!parsed.success) {
+      return res.status(400).json({
+        message: "Solicitud de recuperación inválida",
+      });
+    }
+
+    const changed = await consumeAccessRecovery(
+      parsed.data.token,
+      parsed.data.nuevaPassword
+    );
+
+    if (!changed) {
+      return res.status(400).json({
+        message: "Código inválido, vencido o utilizado",
+      });
+    }
+
+    // Las sesiones anteriores ya fueron revocadas
+    // dentro de la transacción PostgreSQL.
+    // No iniciamos una sesión automáticamente.
+    return res.status(200).json({
+      message: "Contraseña actualizada correctamente",
+    });
+  })
+);
 
 authRouter.post(
   "/login",
