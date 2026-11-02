@@ -124,6 +124,7 @@ export function AuthProvider({ children }) {
   const request = useCallback(
     async (path, options = {}) => {
       const firstToken = accessTokenRef.current;
+      const requestVersion = sessionVersionRef.current;
 
       if (!firstToken) {
         throw new Error("Debes iniciar sesión.");
@@ -140,6 +141,9 @@ export function AuthProvider({ children }) {
         }
 
         try {
+          if (sessionVersionRef.current !== requestVersion) {
+            throw new Error('La sesión cambió. Vuelve a abrir tu espacio.',{cause:error});
+          }
           const latestToken = accessTokenRef.current;
 
           const newToken =
@@ -147,6 +151,9 @@ export function AuthProvider({ children }) {
               ? latestToken
               : await renewSession();
 
+          if (sessionVersionRef.current !== requestVersion) {
+            throw new Error('La sesión cambió. Vuelve a abrir tu espacio.',{cause:error});
+          }
           accessTokenRef.current = newToken;
 
           return await apiRequest(path, {

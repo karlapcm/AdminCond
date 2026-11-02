@@ -1,13 +1,13 @@
 
 export async function apiRequest(
   path,
-  { method = "GET", body, token } = {}
+  { method = "GET", body, token, responseType } = {}
 ) {
   const headers = {
     Accept: "application/json",
   };
 
-  if (body !== undefined) {
+  if (body !== undefined && !(body instanceof FormData)) {
     headers["Content-Type"] = "application/json";
   }
 
@@ -21,11 +21,11 @@ export async function apiRequest(
     response = await fetch(path, {
       method,
       headers,
-      body: body === undefined ? undefined : JSON.stringify(body),
+      body: body instanceof FormData ? body : body === undefined ? undefined : JSON.stringify(body),
     });
   } catch {
     throw new Error(
-      "No se pudo conectar con el servidor. Comprueba que la API esté funcionando."
+      "No pudimos conectar con AdminCond. Intenta nuevamente en unos momentos."
     );
   }
 
@@ -33,6 +33,7 @@ export async function apiRequest(
     return null;
   }
 
+  if (response.ok && responseType === 'blob') return response.blob();
   const data = await response.json().catch(() => null);
 
   if (!response.ok) {
